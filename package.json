@@ -1,0 +1,20 @@
+{
+  "name": "claude-auto",
+  "module": "auto-claude.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^26.0.0",
+    "tsx": "^4.22.4"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "scripts": {
+    "claude": "bunx tsx auto-claude.ts"
+  }
+}
