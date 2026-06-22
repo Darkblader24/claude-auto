@@ -51,6 +51,10 @@ const MENU_PROMPT_TEXT: string = 'stop and wait for limit to reset';
 const MENU_ENTER_DELAY_MS: number = 2000;
 const MENU_GRACE_MS: number = 5000;
 
+// F4 cancels an in-progress countdown. Terminals send F4 either as the SS3
+// sequence ESC O S or as the CSI form ESC [ 14 ~; we match both.
+const F4_SEQUENCES: string[] = ['\x1bOS', '\x1b[14~'];
+
 // Anchored on "hit your session limit" so the percentage early-warning doesn't
 // trip it. Time is lenient: optional minutes, optional space, any case am/pm.
 const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
@@ -125,8 +129,17 @@ if (process.stdin.isTTY) {
 }
 process.stdin.resume();
 
-// Forward everything the user types straight to Claude.
+// Forward everything the user types straight to Claude. The one exception: while
+// a countdown is running, F4 cancels it (and is swallowed so it never reaches
+// Claude). When no countdown is active, F4 passes through untouched.
 process.stdin.on('data', (data: string) => {
+    if (isWaiting && F4_SEQUENCES.some(seq => data.includes(seq))) {
+        cancelCountdown();
+        let rest = data;
+        for (const seq of F4_SEQUENCES) rest = rest.split(seq).join('');
+        if (rest.length > 0) ptyProcess.write(rest);
+        return;
+    }
     ptyProcess.write(data);
 });
 
@@ -322,5 +335,20 @@ function startCountdown(match: RegExpMatchArray): void {
             process.stdout.write(`\x1b]0;⏳ Claude Resumes: ${timeStr}\x07`);
         }
     }, 1000);
+}
+
+// Cancel an in-progress countdown (triggered by F4). Clears the remembered reset
+// and the time we found it, so the very same limit can be detected again.
+function cancelCountdown(): void {
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+        // Restore the window title saved when the countdown started.
+        process.stdout.write('\x1b[23;0t');
+    }
+    isWaiting = false;
+    lastResetMinutes = null;
+    lastFoundAt = 0;
+    log('Countdown cancelled (F4) — reset cleared, detection re-armed');
 }
 
