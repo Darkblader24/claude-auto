@@ -196,7 +196,7 @@ function main(): void {
     // Capture the screen state every x seconds
     captureInterval = setInterval(() => {
         // Already handling a limit (waiting it out or mid-verification) — do nothing.
-        if (isWaiting || isVerifying) return;
+        if (isWaiting || isVerifying || isHandlingMenu) return;
         currentScreen = captureScreen();
         onScreenCapture();
     }, SCREEN_CAPTURE_INTERVAL_MS);
@@ -224,7 +224,7 @@ function resetMinutes(match: RegExpMatchArray): number {
 
 function detectLimit(screen: string): void {
     // Already handling a limit (waiting it out or mid-verification) — do nothing.
-    if (isWaiting || isVerifying) return;
+    if (isWaiting || isVerifying || isHandlingMenu) return;
 
     // Scrolled-up history is stale; ignore it.
     if (screen.includes(SCROLL_INDICATOR)) return;
@@ -233,16 +233,14 @@ function detectLimit(screen: string): void {
     // While the menu is on screen we never run limit detection (it would type
     // "continue" into the menu), so handle it here and bail out.
     if (screen.toLowerCase().includes(MENU_PROMPT_TEXT)) {
-        if (!isHandlingMenu) {
-            isHandlingMenu = true;
-            log('Menu detected — selecting "Stop and wait for limit to reset"');
-            setTimeout(() => {
-                ptyProcess.write('\r');
-                // Release after a grace period so a genuinely new menu can still
-                // be handled later, but the redraw of this one can't re-trigger.
-                setTimeout(() => { isHandlingMenu = false; }, MENU_GRACE_MS);
-            }, MENU_ENTER_DELAY_MS);
-        }
+        isHandlingMenu = true;
+        log('Menu detected — selecting "Stop and wait for limit to reset"');
+        setTimeout(() => {
+            ptyProcess.write('\r');
+            // Release after a grace period so a genuinely new menu can still
+            // be handled later, but the redraw of this one can't re-trigger.
+            setTimeout(() => { isHandlingMenu = false; }, MENU_GRACE_MS);
+        }, MENU_ENTER_DELAY_MS);
         return;
     }
 
