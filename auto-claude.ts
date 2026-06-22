@@ -27,9 +27,12 @@ const LOG_FILE: string = path.join(process.cwd(), 'claude-auto.log');
 // stale scrollback, so we skip detection entirely.
 const SCROLL_INDICATOR: string = ') ↓';
 
-// After a candidate limit we type "continue" and listen to Claude's output for
-// this long; if the limit text re-appears it's real, otherwise it was a ghost.
-const VERIFY_LISTEN_MS: number = 1000;
+// To verify a candidate limit we send this probe message, then re-check the
+// screen. It doubles as a marker: only limit text appearing *after* the most
+// recent probe counts, so a stale banner above it is ignored.
+const VERIFY_PROBE: string = 'Say "Hi", do nothing else';
+// How long to wait after sending the probe before capturing the screen to check.
+const VERIFY_DELAY_MS: number = 5000;
 
 // Safety margin added on top of the parsed reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
@@ -58,11 +61,6 @@ const F4_SEQUENCES: string[] = ['\x1bOS', '\x1b[14~'];
 // Anchored on "hit your session limit" so the percentage early-warning doesn't
 // trip it. Time is lenient: optional minutes, optional space, any case am/pm.
 const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
-
-// Escape-sequence strippers so the verify buffer is matched as plain text:
-// CSI / Fe sequences (colours, cursor moves) and OSC sequences (title sets).
-const ansiRegex: RegExp = /[\x1b\x9b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
-const oscRegex: RegExp = /\x1b][\s\S]*?(?:\x07|\x1b\\)/g;
 
 function log(msg: string): void {
     if (!DEBUG) return;
@@ -104,9 +102,8 @@ const term = new Terminal({ cols, rows, allowProposedApi: true });
 // DETECTION STATE
 // ==========================================
 let isWaiting: boolean = false;     // a confirmed limit countdown is running
-let isVerifying: boolean = false;   // inside the post-"continue" listen window
+let isVerifying: boolean = false;   // inside the post-probe verify window
 let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
-let verifyBuffer: string = '';     // output collected during verification
 let countdownInterval: NodeJS.Timeout | null = null;
 let lastResetMinutes: number | null = null; // reset (minutes-of-day) of last countdown
 let lastFoundAt: number = 0;                 // wall-clock time we started that countdown
@@ -144,14 +141,10 @@ process.stdin.on('data', (data: string) => {
 });
 
 // Forward Claude's output to the real terminal and mirror it into the headless
-// terminal. While verifying a limit, also collect the output (stripped of escape
-// sequences) so we can scan it for the limit text re-appearing.
+// terminal so its screen buffer stays in sync with what's on screen.
 ptyProcess.onData((data: string) => {
     process.stdout.write(data);
     term.write(data);
-    if (isVerifying) {
-        verifyBuffer += data.replace(oscRegex, '').replace(ansiRegex, '');
-    }
 });
 
 // ==========================================
@@ -235,6 +228,14 @@ function resetMinutes(match: RegExpMatchArray): number {
     return hours * 60 + minutes;
 }
 
+// Only session-limit text *after* the most recent probe counts; anything above
+// the probe is stale. Returns the slice after the last probe occurrence, or all
+// of `text` when the probe isn't on screen.
+function afterProbe(text: string): string {
+    const idx = text.lastIndexOf(VERIFY_PROBE);
+    return idx === -1 ? text : text.slice(idx + VERIFY_PROBE.length);
+}
+
 function detectLimit(screen: string): void {
     // Already handling a limit (waiting it out or mid-verification) — do nothing.
     if (isWaiting || isVerifying || isHandlingMenu) return;
@@ -257,7 +258,8 @@ function detectLimit(screen: string): void {
         return;
     }
 
-    const match = screen.match(limitRegex);
+    // Ignore any limit text above the most recent probe; only what's below counts.
+    const match = afterProbe(screen).match(limitRegex);
     if (!match) return;
 
     // Skip a reset we've already counted down to (a stale banner re-appearing
@@ -270,25 +272,22 @@ function detectLimit(screen: string): void {
         return;
     }
 
-    // Candidate limit on the live screen. Confirm it by typing "continue" and
-    // listening for the limit to come back within VERIFY_LISTEN_MS.
-    log('Possible session limit — typing "continue" to verify');
+    // Candidate limit on the live screen. Confirm it by sending the probe, then
+    // after VERIFY_DELAY_MS re-checking the screen below the probe for a limit.
+    log('Possible session limit — sending verify probe');
     isVerifying = true;
-    verifyBuffer = '';
-    ptyProcess.write(CLEAR_INPUT_SEQUENCE + 'continue\r');
+    ptyProcess.write(CLEAR_INPUT_SEQUENCE + VERIFY_PROBE + '\r');
 
     setTimeout(() => {
         isVerifying = false;
-        const confirm = verifyBuffer.match(limitRegex);
-        log('Verify Buffer: ' + verifyBuffer);
-        verifyBuffer = '';
+        const confirm = afterProbe(captureScreen()).match(limitRegex);
         if (confirm) {
-            log('Limit re-appeared after "continue" — confirmed real');
+            log('Limit re-appeared after probe — confirmed real');
             startCountdown(confirm);
         } else {
-            log('No limit after "continue" — treating as ghost, ignoring');
+            log('No limit after probe — treating as ghost, ignoring');
         }
-    }, VERIFY_LISTEN_MS);
+    }, VERIFY_DELAY_MS);
 }
 
 function startCountdown(match: RegExpMatchArray): void {
