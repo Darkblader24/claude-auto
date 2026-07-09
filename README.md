@@ -17,9 +17,8 @@
 CLI. It runs `claude` inside a pseudo-terminal and forwards your keystrokes and
 Claude's output untouched, so the TUI looks and behaves exactly as it always has.
 
-The difference: it also *reads the screen*. When Claude reports that you've hit
-your session limit, `claude-auto` parses the reset time, counts it down in your
-window title, and sends `continue` the moment your quota is back — no babysitting,
+The difference: when Claude reports that you've hit your session limit, `claude-auto` parses the reset time, 
+counts it down in your window title, and sends `continue` the moment your quota is back, no babysitting,
 no lost context.
 
 ```
@@ -47,7 +46,7 @@ Requires Node.js 18+ and the [`claude` CLI](https://claude.com/claude-code)
 already installed and on your `PATH`.
 
 > [!NOTE]
-> Not published to npm yet. For now, run it from source — see
+> Not published to npm yet. For now, run it from source, see
 > [Development](#development).
 
 ## Usage
@@ -85,9 +84,9 @@ picked up again.
 
 ## How auto-resume works
 
-Every 2 seconds, `claude-auto` snapshots the **rendered screen** — the grid of
+Every 2 seconds, `claude-auto` snapshots the **rendered screen**, the grid of
 characters actually on display, mirrored into a headless
-[xterm](https://github.com/xtermjs/xterm.js) — rather than the raw escape-sequence
+[xterm](https://github.com/xtermjs/xterm.js), rather than the raw escape-sequence
 stream. That means it sees what you see, and isn't fooled by redraws, spinners,
 or partial writes.
 
@@ -104,7 +103,7 @@ When a session-limit banner appears:
 
 A few details that keep it honest:
 
-- Detection is skipped entirely while you're scrolled up through history — what's
+- Detection is skipped entirely while you're scrolled up through history, what's
   on screen there is stale.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
@@ -147,24 +146,24 @@ On Windows, `claude-auto.cmd` runs the local source without installing anything.
 
 ### Layout
 
-| Path | Purpose |
-| :--- | :--- |
-| `auto-claude.ts` | The entire wrapper — pty spawn, screen capture, limit detection |
-| `tsconfig.json` | Type-check config (`noEmit`) |
-| `tsconfig.build.json` | Emit config used by `bun run build` |
-| `.github/workflows/release.yml` | Publishes on version bump |
+| Path                            | Purpose                                                        |
+|:--------------------------------|:---------------------------------------------------------------|
+| `auto-claude.ts`                | The entire wrapper, pty spawn, screen capture, limit detection |
+| `tsconfig.json`                 | Type-check config (`noEmit`)                                   |
+| `tsconfig.build.json`           | Emit config used by `bun run build`                            |
+| `.github/workflows/release.yml` | Publishes on version bump                                      |
 
 ## Publishing
 
 Releases are cut by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-on every push to `main`, but **only when `version` in `package.json` changes** —
+on every push to `main`, but **only when `version` in `package.json` changes**,
 an ordinary push is a no-op. Publishing is currently disabled by
 `"private": true`.
 
 To arm it:
 
 1. **Pick the npm name.** It lives in exactly one place: the `name` field of
-   `package.json`. Nothing else depends on it — not the workflow, not the binary
+   `package.json`. Nothing else depends on it, not the workflow, not the binary
    name, nothing but this file. A scoped name (`@scope/claude-auto`) works
    unchanged; the workflow already passes `--access public`.
 2. **Remove `"private": true`** from `package.json`.

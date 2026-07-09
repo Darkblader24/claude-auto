@@ -78,6 +78,25 @@ function log(msg: string): void {
 }
 
 // ==========================================
+// SELF-CALL GUARD
+// ==========================================
+// A shell alias (`alias claude=claude-auto`) can't reach us: aliases are never
+// exported and we exec directly, not through a shell. But a *script* named
+// `claude` on PATH pointing back here would be found when we spawn `claude`,
+// and we'd fork-bomb. We mark the child's environment; seeing that mark on
+// startup means we're about to wrap ourselves.
+const ACTIVE_ENV: string = 'CLAUDE_AUTO_ACTIVE';
+
+if (process.env[ACTIVE_ENV] === '1') {
+    // Safe to write here: the pty doesn't exist yet, so there's no TUI to corrupt.
+    process.stderr.write(
+        'claude-auto: refusing to wrap itself — "claude" on your PATH points back at claude-auto.\n' +
+        '  Use "alias claude=claude-auto" instead of installing it under the name "claude".\n'
+    );
+    process.exit(1);
+}
+
+// ==========================================
 // SPAWN CLAUDE
 // ==========================================
 const cols: number = process.stdout.columns || 80;
@@ -94,7 +113,7 @@ const ptyProcess = pty.spawn(shell, args, {
     cols,
     rows,
     cwd: process.cwd(),
-    env: process.env as Record<string, string>,
+    env: { ...process.env, [ACTIVE_ENV]: '1' } as Record<string, string>,
     useConpty: true,
     // Use the standalone conpty.dll bundled with node-pty for better redraw
     // fidelity than the older in-box Windows ConPTY.
