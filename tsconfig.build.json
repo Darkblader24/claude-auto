@@ -1,0 +1,15 @@
+// Emit config used by `bun run build`. The base tsconfig is bundler-flavoured
+// and type-check only; publishing needs real Node-resolvable ESM on disk.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    // Only legal when nothing is emitted.
+    "allowImportingTsExtensions": false
+  },
+  "include": ["auto-claude.ts"]
+}

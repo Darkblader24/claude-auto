@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as pty from 'node-pty';
 import * as os from 'os';
 import * as fs from 'fs';
@@ -7,8 +8,17 @@ import { createRequire } from 'node:module';
 // ==========================================
 // CLI ARGS
 // ==========================================
-// Debug logging is opt-in via a flag (no env var). Pass --debug or -d.
-const DEBUG: boolean = process.argv.includes('--debug') || process.argv.includes('-d');
+// This wrapper is a drop-in replacement for `claude`: every argument we don't
+// recognise is forwarded verbatim to the real CLI. Our own flags are namespaced
+// with an `auto-` prefix so they can't collide with claude's (`claude --debug`
+// is a real flag), and they are stripped before forwarding.
+const WRAPPER_FLAGS: ReadonlySet<string> = new Set(['--auto-debug']);
+
+// Debug logging is opt-in via a flag (no env var). Pass --auto-debug.
+const DEBUG: boolean = process.argv.includes('--auto-debug');
+
+// Everything after `node auto-claude.ts`, minus our own flags.
+const forwardedArgs: string[] = process.argv.slice(2).filter(arg => !WRAPPER_FLAGS.has(arg));
 
 // ==========================================
 // CONFIG
@@ -73,8 +83,11 @@ function log(msg: string): void {
 const cols: number = process.stdout.columns || 80;
 const rows: number = process.stdout.rows || 24;
 
+// `claude` is a shell shim on Windows, so it can only be launched through cmd.exe.
 const shell = os.platform() === 'win32' ? 'cmd.exe' : 'claude';
-const args = os.platform() === 'win32' ? ['/c', 'claude'] : [];
+const args = os.platform() === 'win32'
+    ? ['/c', 'claude', ...forwardedArgs]
+    : forwardedArgs;
 
 const ptyProcess = pty.spawn(shell, args, {
     name: 'xterm-256color',
@@ -264,8 +277,8 @@ function detectLimit(screen: string): void {
     if (!match) return;
 
     // Skip a reset we've already counted down to (a stale banner re-appearing
-    // after we resumed), unless 23h have passed — by then the same clock time is
-    // a new day's limit.
+    // after we resumed), unless the repeat window has passed — by then the same
+    // clock time is a new day's limit.
     if (lastResetMinutes !== null &&
         resetMinutes(match) === lastResetMinutes &&
         Date.now() - lastFoundAt < REPEAT_LIMIT_WINDOW_MS) {

@@ -1,14 +1,35 @@
 {
   "name": "claude-auto",
-  "module": "auto-claude.ts",
-  "type": "module",
+  "version": "0.0.0",
   "private": true,
+  "description": "A node-pty wrapper around the claude CLI that auto-resumes the session when you hit a usage limit.",
+  "keywords": ["claude", "claude-code", "cli", "pty", "wrapper", "auto-resume"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Darkblader24/claude-auto.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Darkblader24/claude-auto/issues"
+  },
+  "homepage": "https://github.com/Darkblader24/claude-auto#readme",
+  "type": "module",
+  "bin": {
+    "claude-auto": "dist/auto-claude.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["win32", "darwin", "linux"],
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^26.0.0",
-    "tsx": "^4.22.4"
-  },
-  "peerDependencies": {
+    "tsx": "^4.22.4",
     "typescript": "^5"
   },
   "dependencies": {
@@ -16,6 +37,9 @@
     "node-pty": "^1.1.0"
   },
   "scripts": {
-    "claude": "bunx tsx auto-claude.ts"
+    "claude": "bunx tsx auto-claude.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --project tsconfig.build.json",
+    "prepack": "tsc --project tsconfig.build.json"
   }
 }

@@ -1,2 +1,2 @@
 @echo off
-bunx tsx "E:\Development\Projects\claude-auto\auto-claude.ts" %*
+bunx tsx "%~dp0auto-claude.ts" %*
