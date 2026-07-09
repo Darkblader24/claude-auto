@@ -4,11 +4,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createRequire } from 'node:module';
 
-// @xterm/headless ships a CJS bundle whose named exports Node's ESM loader can't
-// statically detect, so we pull Terminal in via require() (this project runs
-// under tsx). The cast restores the proper types from the package typings.
-const { Terminal } = createRequire(import.meta.url)('@xterm/headless') as typeof import('@xterm/headless');
-
 // ==========================================
 // CLI ARGS
 // ==========================================
@@ -18,9 +13,18 @@ const DEBUG: boolean = process.argv.includes('--debug') || process.argv.includes
 // ==========================================
 // CONFIG
 // ==========================================
-// How often we snapshot the rendered screen (and run limit detection on it).
-const SCREEN_CAPTURE_INTERVAL_MS: number = 2000;
-const LOG_FILE: string = path.join(process.cwd(), 'claude-auto.log');
+
+// Anchored on "hit your session limit" so the percentage early-warning doesn't
+// trip it. Time is lenient: optional minutes, optional space, any case am/pm.
+const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+
+// Claude sometimes offers a "Stop and wait for limit to reset" menu; we select it
+// (press Enter) so the session parks until reset. Wait briefly so the menu has
+// fully rendered, then ignore it for a grace period so the redraw doesn't make
+// us press Enter twice.
+const MENU_PROMPT_TEXT: string = 'stop and wait for limit to reset';
+const MENU_ENTER_DELAY_MS: number = 2000;
+const MENU_GRACE_MS: number = 5000;
 
 // When this substring is on screen the user is scrolled up through history
 // (it's the "(ctrl+End) ↓" jump-to-bottom hint). What we read in that state is
@@ -30,10 +34,10 @@ const SCROLL_INDICATOR: string = ') ↓';
 // To verify a candidate limit we send this probe message, then re-check the
 // screen. It doubles as a marker: only limit text appearing *after* the most
 // recent probe counts, so a stale banner above it is ignored.
-const VERIFY_PROBE: string = 'Say "Hi", do nothing else';
+const VERIFY_PROBE: string = 'continue';
+
 // How long to wait after sending the probe before capturing the screen to check.
 const VERIFY_DELAY_MS: number = 5000;
-
 // Safety margin added on top of the parsed reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
 
@@ -46,21 +50,13 @@ const REPEAT_LIMIT_WINDOW_MS: number = 19 * 60 * 60 * 1000;
 // a few times to wipe the whole composer before typing our own command.
 const CLEAR_INPUT_SEQUENCE: string = '\x15'.repeat(8);
 
-// Claude sometimes offers a "Stop and wait for limit to reset" menu; we select it
-// (press Enter) so the session parks until reset. Wait briefly so the menu has
-// fully rendered, then ignore it for a grace period so the redraw doesn't make
-// us press Enter twice.
-const MENU_PROMPT_TEXT: string = 'stop and wait for limit to reset';
-const MENU_ENTER_DELAY_MS: number = 2000;
-const MENU_GRACE_MS: number = 5000;
-
 // F4 cancels an in-progress countdown. Terminals send F4 either as the SS3
 // sequence ESC O S or as the CSI form ESC [ 14 ~; we match both.
 const F4_SEQUENCES: string[] = ['\x1bOS', '\x1b[14~'];
 
-// Anchored on "hit your session limit" so the percentage early-warning doesn't
-// trip it. Time is lenient: optional minutes, optional space, any case am/pm.
-const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+// How often we snapshot the rendered screen in debug mode (and run limit detection on it).
+const SCREEN_CAPTURE_INTERVAL_MS: number = 2000;
+const LOG_FILE: string = path.join(process.cwd(), 'claude-auto.log');
 
 function log(msg: string): void {
     if (!DEBUG) return;
@@ -91,6 +87,11 @@ const ptyProcess = pty.spawn(shell, args, {
     // fidelity than the older in-box Windows ConPTY.
     useConptyDll: true
 });
+
+// @xterm/headless ships a CJS bundle whose named exports Node's ESM loader can't
+// statically detect, so we pull Terminal in via require() (this project runs
+// under tsx). The cast restores the proper types from the package typings.
+const { Terminal } = createRequire(import.meta.url)('@xterm/headless') as typeof import('@xterm/headless');
 
 // A headless terminal mirrors Claude's TUI so we can read the *rendered* screen
 // (the grid of characters the user actually sees) instead of the raw escape
