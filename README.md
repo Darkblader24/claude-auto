@@ -105,6 +105,12 @@ A few details that keep it honest:
 
 - Detection is skipped entirely while you're scrolled up through history, what's
   on screen there is stale.
+- Nothing is typed while Claude is asking whether to resume a long session *from
+  a summary* ("Resume from summary (recommended)" / "Resume full session
+  as-is"). That question is a select menu, so an Enter would answer it, and the
+  default answer compacts your conversation. That choice stays yours. If a
+  countdown runs out while the question is up, `claude-auto` holds and resumes
+  the moment you've answered.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all

@@ -41,6 +41,16 @@ const MENU_GRACE_MS: number = 5000;
 // stale scrollback, so we skip detection entirely.
 const SCROLL_INDICATOR: string = ') ↓';
 
+// Resuming an old, large session makes Claude ask whether to summarise it first
+// ("This session is 3h old and 150K tokens" → "Resume from summary
+// (recommended)" / "Resume full session as-is" / "Don't ask me again"). That
+// question is a select menu, so any Enter we send answers it — and the default
+// choice compacts the conversation. Worse, the limit banner from the session
+// we're resuming is usually still on screen behind it, so detection would fire
+// right into the menu. While the question is up we type nothing at all.
+// Matched against the first option's label: short enough not to wrap.
+const RESUME_PROMPT_TEXT: string = 'resume from summary';
+
 // To verify a candidate limit we send this probe message, then re-check the
 // screen. It doubles as a marker: only limit text appearing *after* the most
 // recent probe counts, so a stale banner above it is ignored.
@@ -269,12 +279,24 @@ function afterProbe(text: string): string {
     return idx === -1 ? text : text.slice(idx + VERIFY_PROBE.length);
 }
 
+// True while Claude's resume-from-summary question is on screen. Answering it is
+// the user's call, so we send nothing — not the probe, not the resume.
+function hasResumePrompt(screen: string): boolean {
+    return screen.toLowerCase().includes(RESUME_PROMPT_TEXT);
+}
+
 function detectLimit(screen: string): void {
     // Already handling a limit (waiting it out or mid-verification) — do nothing.
     if (isWaiting || isVerifying || isHandlingMenu) return;
 
     // Scrolled-up history is stale; ignore it.
     if (screen.includes(SCROLL_INDICATOR)) return;
+
+    // Checked before the menu below, which would answer this question with its Enter.
+    if (hasResumePrompt(screen)) {
+        log('Resume-from-summary question on screen — detection paused');
+        return;
+    }
 
     // Auto-select Claude's "Stop and wait for limit to reset" menu when shown.
     // While the menu is on screen we never run limit detection (it would type
@@ -351,6 +373,14 @@ function startCountdown(match: RegExpMatchArray): void {
         const remainingMs = targetTimeMs - Date.now();
 
         if (remainingMs <= 0) {
+            // Quota is back, but the resume-from-summary question is up: our Enter
+            // would answer it. Hold the countdown open and try again next tick, so
+            // the session resumes the moment the user has answered.
+            if (hasResumePrompt(captureScreen())) {
+                log('Timer elapsed but resume-from-summary question is up — holding');
+                process.stdout.write('\x1b]0;⏳ Claude Resumes: waiting for your answer\x07');
+                return;
+            }
             clearInterval(countdownInterval!);
             countdownInterval = null;
             isWaiting = false;
