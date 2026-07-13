@@ -1,11 +1,12 @@
 <div align="center">
 
 # claude-auto
+![⏳ Claude Resumes: 2h 14m 08s](https://i.imgur.com/2braByb.gif)
 
 **Hit your session limit? Go do something else.**
+<br>
 `claude-auto` automatically waits out the reset and picks up right where you left off.
 
-![⏳ Claude Resumes: 2h 14m 08s](https://i.imgur.com/2braByb.gif)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
@@ -43,8 +44,7 @@ yarn global add claude-auto
 
 ## Usage
 
-`claude-auto` is a **drop-in replacement** for `claude`. Anything it doesn't
-recognise is forwarded verbatim to the real CLI:
+`claude-auto` is a **drop-in replacement** for `claude`. All user arguments are forwarded directly to the real CLI:
 
 ```bash
 claude-auto                         # same as `claude`
@@ -103,6 +103,15 @@ picked up again.
   standard function keys` is enabled in Settings, so countdown cancelling may
   not reach the wrapper.
 
+## License
+
+[MIT](LICENSE) © Philipp Köhler
+
+---
+
+<details>
+<summary>Dev Notes</summary>
+
 ## How auto-resume works
 
 Every 2 seconds, `claude-auto` snapshots the **rendered screen**, the grid of
@@ -144,18 +153,6 @@ Some more details:
   be mistaken for the session bar.
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all
   diagnostics go to the optional log file.
-
-## License
-
-[MIT](LICENSE) © Philipp Köhler
-
----
-
-<details>
-<summary>Dev Notes</summary>
-<!-- ─────────────────────────────────────────────────────────────────────────
-     Everything below this line is for contributors and maintainers.
-     ───────────────────────────────────────────────────────────────────── -->
 
 ## Development
 
