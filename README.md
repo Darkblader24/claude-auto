@@ -2,28 +2,27 @@
 
 # claude-auto
 
-**Hit your usage limit? Go do something else.**
-`claude-auto` waits out the reset and picks up right where you left off.
+**Hit your session limit? Go do something else.**
+`claude-auto` automatically waits out the reset and picks up right where you left off.
+
+![⏳ Claude Resumes: 2h 14m 08s](https://i.imgur.com/2braByb.gif)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#)
-
-</div>
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#platform-support)
 
 ---
 
 `claude-auto` is a transparent wrapper around the [Claude Code](https://claude.com/claude-code)
 CLI. It runs `claude` inside a pseudo-terminal and forwards your keystrokes and
-Claude's output untouched, so the TUI looks and behaves exactly as it always has.
+Claude's output untouched, so the TUI looks and behaves **exactly** as it always has.
 
-The difference: when Claude reports that you've hit your session limit, `claude-auto` parses the reset time, 
-counts it down in your window title, and sends `continue` the moment your quota is back, no babysitting,
-no lost context.
+The difference: when Claude reports that you've hit your session limit, `claude-auto` sends
+a quick `/usage` command to confirm the limit, counts it down in your window title, and sends `continue` 
+the moment your quota is back. No babysitting, no lost context.
 
-```
-⏳ Claude Resumes: 2h 14m 08s
-```
+---
+</div>
 
 ## Install
 
@@ -32,7 +31,7 @@ npm install -g claude-auto
 ```
 
 <details>
-<summary>Other package managers</summary>
+<summary>More package managers</summary>
 
 ```bash
 bun add -g claude-auto
@@ -41,32 +40,6 @@ yarn global add claude-auto
 ```
 
 </details>
-
-Requires Node.js 18+ and the [`claude` CLI](https://claude.com/claude-code)
-already installed and on your `PATH`.
-
-> [!NOTE]
-> Not published to npm yet. For now, run it from source, see
-> [Development](#development).
-
-### Platform support
-
-Windows, macOS and Linux are all supported: the only platform-specific code is
-how `claude` is launched (Windows needs `cmd.exe /c`, since `claude` is a shell
-shim there; elsewhere it's exec'd directly).
-
-Development so far has happened on Windows, so macOS and Linux are the less
-travelled paths. One known rough edge there:
-
-- On macOS, <kbd>F4</kbd> is a system key unless *Use F1, F2, etc. keys as
-  standard function keys* is enabled in Settings, so countdown cancelling may
-  not reach the wrapper.
-
-The countdown restores your window title afterwards without relying on the
-xterm title stack (`ESC[22t` / `ESC[23t`), which macOS Terminal.app doesn't
-implement: Claude's own title-setting sequences pass through the wrapper on
-their way to the terminal, so the last one is remembered and written back when
-the countdown ends. That works on any terminal that can show a title at all.
 
 ## Usage
 
@@ -79,7 +52,7 @@ claude-auto --resume              # same as `claude --resume`
 claude-auto -p "explain this"     # same as `claude -p "explain this"`
 ```
 
-So the only change to your workflow is the command you type. Alias it and forget
+So the only change to your workflow is the command you type. You can alias it and forget
 it's there:
 
 ```bash
@@ -94,18 +67,13 @@ Set-Alias claude claude-auto             # PowerShell — add to $PROFILE
 doskey claude=claude-auto $*             :: cmd.exe
 ```
 
-> [!IMPORTANT]
-> Alias it — don't install it *as* `claude`. A `claude` on your `PATH` that
-> points back here would make the wrapper spawn itself; it detects that and
-> refuses to start.
-
 ### Flags
 
 `claude-auto` owns exactly one flag. It's namespaced with `--auto-` so it can
 never collide with a real `claude` flag, and it's stripped before forwarding.
 
-| Flag | Effect |
-| :--- | :--- |
+| Flag           | Effect                                                                        |
+|:---------------|:------------------------------------------------------------------------------|
 | `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
 ### Cancelling a countdown
@@ -232,3 +200,9 @@ Notes for whoever picks the name:
   because it requires a public repo. If you make this repo public, add
   `--provenance` to the publish step and `id-token: write` to the job's
   `permissions`.
+
+### Platform support
+
+- On macOS, <kbd>F4</kbd> is a system key unless *Use F1, F2, etc. keys as
+  standard function keys* is enabled in Settings, so countdown cancelling may
+  not reach the wrapper.
