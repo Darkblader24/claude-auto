@@ -129,10 +129,13 @@ function log(msg: string): void {
 const ACTIVE_ENV: string = 'CLAUDE_AUTO_ACTIVE';
 
 if (process.env[ACTIVE_ENV] === '1') {
+    const aliasHint: string = os.platform() === 'win32'
+        ? 'Set-Alias claude claude-auto   (PowerShell $PROFILE)  or  doskey claude=claude-auto $*   (cmd)'
+        : 'alias claude=claude-auto';
     // Safe to write here: the pty doesn't exist yet, so there's no TUI to corrupt.
     process.stderr.write(
         'claude-auto: refusing to wrap itself — "claude" on your PATH points back at claude-auto.\n' +
-        '  Use "alias claude=claude-auto" instead of installing it under the name "claude".\n'
+        `  Alias it instead of installing it under the name "claude": ${aliasHint}\n`
     );
     process.exit(1);
 }
@@ -186,6 +189,71 @@ let captureInterval: NodeJS.Timeout | null = null;
 let currentScreen: string = '';
 
 // ==========================================
+// WINDOW TITLE
+// ==========================================
+// The countdown takes the window title over, so it has to put back whatever was
+// there before. xterm's title stack (ESC[22;0t to push, ESC[23;0t to pop) does
+// that in one sequence, but not every terminal implements it — macOS
+// Terminal.app ignores both, and the title is left showing a countdown that
+// finished. So we keep the title ourselves instead: Claude sets it with an OSC
+// sequence, and every byte it writes passes through us on the way to the
+// terminal, so we can read the title off that stream and write it back verbatim.
+// Only OSC 0 (icon + title) and OSC 2 (title) carry one; both end in BEL or ST.
+const oscTitleRegex: RegExp = /\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+// A sequence can be split across two pty chunks, so an unfinished one is carried
+// into the next scan. Capped, so an introducer that never gets its terminator
+// can't grow the carry without bound.
+const TITLE_CARRY_MAX: number = 4096;
+
+let childTitle: string = '';          // the last title Claude set ('' until it sets one)
+let titleCarry: string = '';          // partial sequence carried between chunks
+let titleOverridden: boolean = false; // the countdown is currently showing its own title
+
+// Scan a chunk of Claude's output for title sequences, keeping the last one.
+function trackTitle(data: string): void {
+    const stream: string = titleCarry + data;
+    let consumed: number = 0;
+    let match: RegExpExecArray | null;
+    oscTitleRegex.lastIndex = 0;
+    while ((match = oscTitleRegex.exec(stream)) !== null) {
+        childTitle = match[1]!;
+        consumed = oscTitleRegex.lastIndex;
+    }
+    titleCarry = pendingOsc(stream.slice(consumed));
+    if (titleCarry.length > TITLE_CARRY_MAX) titleCarry = '';
+}
+
+// The part of a chunk that may be an OSC sequence still waiting for the rest of
+// itself: from the last *unterminated* ESC ] onwards, or a lone trailing ESC
+// that could become one. Note it can't just be "from the last ESC" — the ESC of
+// an ST terminator sits inside the very sequence we're trying to keep.
+// An OSC that's already terminated is one we didn't want (OSC 8, OSC 10, …), so
+// it's dropped rather than carried, which is what keeps the carry from growing.
+function pendingOsc(rest: string): string {
+    const start: number = rest.lastIndexOf('\x1b]');
+    if (start !== -1) {
+        const tail: string = rest.slice(start);
+        const terminated: boolean = tail.includes('\x07') || tail.indexOf('\x1b\\', 1) !== -1;
+        if (!terminated) return tail;
+    }
+    return rest.endsWith('\x1b') ? '\x1b' : '';
+}
+
+function setTitle(title: string): void {
+    try {
+        process.stdout.write(`\x1b]0;${title}\x07`);
+    } catch { /* terminal already gone */ }
+}
+
+// Put back the title Claude last set. If it never set one, that's the empty
+// title an untitled window has anyway. No-op unless the countdown took it over.
+function restoreTitle(): void {
+    if (!titleOverridden) return;
+    titleOverridden = false;
+    setTitle(childTitle);
+}
+
+// ==========================================
 // I/O WIRING
 // ==========================================
 process.stdout.on('resize', () => {
@@ -220,6 +288,7 @@ process.stdin.on('data', (data: string) => {
 ptyProcess.onData((data: string) => {
     process.stdout.write(data);
     term.write(data);
+    trackTitle(data);
 });
 
 // ==========================================
@@ -255,9 +324,8 @@ function cleanup(): void {
     if (countdownInterval) {
         clearInterval(countdownInterval);
         countdownInterval = null;
-        // Pop the saved window title back off the terminal's stack.
-        try { process.stdout.write('\x1b[23;0t'); } catch { /* terminal already gone */ }
     }
+    restoreTitle();
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch { /* terminal already gone */ }
 }
 
@@ -490,8 +558,8 @@ function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void
     lastResetMinutes = bannerMinutes;
     lastFoundAt = Date.now();
 
-    // Save the current window title so we can restore it after the countdown.
-    process.stdout.write('\x1b[22;0t');
+    // From here on the title is ours; restoreTitle() hands it back.
+    titleOverridden = true;
 
     const hours = Math.floor(targetMinutesOfDay / 60);
     const minutes = targetMinutesOfDay % 60;
@@ -514,14 +582,14 @@ function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void
             // the session resumes the moment the user has answered.
             if (hasResumePrompt(captureScreen())) {
                 log('Timer elapsed but resume-from-summary question is up — holding');
-                process.stdout.write('\x1b]0;⏳ Claude Resumes: waiting for your answer\x07');
+                setTitle('⏳ Claude Resumes: waiting for your answer');
                 return;
             }
             clearInterval(countdownInterval!);
             countdownInterval = null;
             isWaiting = false;
-            // Restore the window title and resume the session.
-            process.stdout.write('\x1b[23;0t');
+            // Hand the title back to Claude and resume the session.
+            restoreTitle();
             log('Timer elapsed — sending "continue" to resume');
             ptyProcess.write(CLEAR_INPUT_SEQUENCE + 'continue\r');
         } else {
@@ -530,7 +598,7 @@ function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void
             const m = Math.floor((totalSeconds % 3600) / 60);
             const s = totalSeconds % 60;
             const timeStr = `${h > 0 ? h + 'h ' : ''}${m}m ${s}s`;
-            process.stdout.write(`\x1b]0;⏳ Claude Resumes: ${timeStr}\x07`);
+            setTitle(`⏳ Claude Resumes: ${timeStr}`);
         }
     }, 1000);
 }
@@ -541,9 +609,8 @@ function cancelCountdown(): void {
     if (countdownInterval) {
         clearInterval(countdownInterval);
         countdownInterval = null;
-        // Restore the window title saved when the countdown started.
-        process.stdout.write('\x1b[23;0t');
     }
+    restoreTitle();
     isWaiting = false;
     lastResetMinutes = null;
     lastFoundAt = 0;

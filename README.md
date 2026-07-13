@@ -49,6 +49,25 @@ already installed and on your `PATH`.
 > Not published to npm yet. For now, run it from source, see
 > [Development](#development).
 
+### Platform support
+
+Windows, macOS and Linux are all supported: the only platform-specific code is
+how `claude` is launched (Windows needs `cmd.exe /c`, since `claude` is a shell
+shim there; elsewhere it's exec'd directly).
+
+Development so far has happened on Windows, so macOS and Linux are the less
+travelled paths. One known rough edge there:
+
+- On macOS, <kbd>F4</kbd> is a system key unless *Use F1, F2, etc. keys as
+  standard function keys* is enabled in Settings, so countdown cancelling may
+  not reach the wrapper.
+
+The countdown restores your window title afterwards without relying on the
+xterm title stack (`ESC[22t` / `ESC[23t`), which macOS Terminal.app doesn't
+implement: Claude's own title-setting sequences pass through the wrapper on
+their way to the terminal, so the last one is remembered and written back when
+the countdown ends. That works on any terminal that can show a title at all.
+
 ## Usage
 
 `claude-auto` is a **drop-in replacement** for `claude`. Anything it doesn't
@@ -64,8 +83,21 @@ So the only change to your workflow is the command you type. Alias it and forget
 it's there:
 
 ```bash
-alias claude=claude-auto
+alias claude=claude-auto                 # bash / zsh — add to ~/.bashrc or ~/.zshrc
 ```
+
+```powershell
+Set-Alias claude claude-auto             # PowerShell — add to $PROFILE
+```
+
+```bat
+doskey claude=claude-auto $*             :: cmd.exe
+```
+
+> [!IMPORTANT]
+> Alias it — don't install it *as* `claude`. A `claude` on your `PATH` that
+> points back here would make the wrapper spawn itself; it detects that and
+> refuses to start.
 
 ### Flags
 
