@@ -47,9 +47,9 @@ yarn global add claude-auto
 recognise is forwarded verbatim to the real CLI:
 
 ```bash
-claude-auto                       # same as `claude`
-claude-auto --resume              # same as `claude --resume`
-claude-auto -p "explain this"     # same as `claude -p "explain this"`
+claude-auto                         # same as `claude`
+claude-auto -p "explain this"       # same as `claude -p "explain this"`
+claude-auto --permission-mode auto  # same as `claude --permission-mode auto`
 ```
 
 So the only change to your workflow is the command you type. You can alias it and forget
@@ -95,7 +95,7 @@ When a session-limit banner appears:
 1. **If Claude is offering its "Stop and wait for limit to reset" menu**, it
    selects that option for you.
 2. **Otherwise it confirms the limit against `/usage`.** It opens Claude's
-   `/usage` panel and reads the *Current session* block — percent used and reset
+   `/usage` panel and reads the *Current session* blocks percent used and reset
    time. Only a bar at **100% used** confirms the limit, so a stale banner on
    screen can't trigger a false positive. If the window is too small to show the
    block, the panel is scrolled step by step until both values have been read.
@@ -105,25 +105,24 @@ When a session-limit banner appears:
    banner — showing the remaining time in your window title, and sends
    `continue` when the clock runs out.
 
-A few details that keep it honest:
+Some more details:
 
 - Detection is skipped entirely while you're scrolled up through history, what's
   on screen there is stale.
 - Nothing is typed while Claude is asking whether to resume a long session *from
   a summary* ("Resume from summary (recommended)" / "Resume full session
-  as-is"). That question is a select menu, so an Enter would answer it, and the
-  default answer compacts your conversation. That choice stays yours. If a
-  countdown runs out while the question is up, `claude-auto` holds and resumes
-  the moment you've answered.
+  as-is"). If a countdown runs out while the question is up, `claude-auto` holds 
+  and resumes the moment you've answered.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
-- A banner that `/usage` disproves (session below 100%) isn't re-checked for
-  5 minutes, so the panel doesn't keep popping open over a stale banner.
+- A banner that `/usage` disproves (session below 100%) is remembered by its reset
+  time and is ignored until a real limit is hit, or after 3 hours, whichever
+  comes first.
 - The weekly rows in `/usage` also say "% used", but only text between the
   *Current session* heading and the next section is ever parsed, so they can't
   be mistaken for the session bar.
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all
-  diagnostics go to the log file.
+  diagnostics go to the optional log file.
 
 ### Debug logging
 

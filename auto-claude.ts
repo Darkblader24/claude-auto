@@ -85,9 +85,15 @@ const USAGE_MAX_SCROLL_STEPS: number = 40;
 const USAGE_CLOSE_KEY: string = '\x1b';
 const USAGE_CLOSE_DELAY_MS: number = 500;
 
-// After a verification that came back "not at the limit" (a stale banner still
-// on screen), don't re-open /usage for this long — the popup is disruptive.
-const GHOST_COOLDOWN_MS: number = 5 * 60 * 1000;
+// A banner /usage disproved (session below 100%) is remembered by its reset time
+// and never verified again — re-opening the panel for it would find the same
+// answer. It's re-armed when a real limit is hit, or after this long, by which
+// point the same clock time belongs to a later session.
+const DISPROVED_LIMIT_WINDOW_MS: number = 3 * 60 * 60 * 1000;
+
+// When /usage couldn't be read at all we've learned nothing about the banner, so
+// this is a plain retry backoff — long enough that the popup isn't disruptive.
+const USAGE_RETRY_COOLDOWN_MS: number = 5 * 60 * 1000;
 
 // Safety margin added on top of the /usage reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
@@ -184,7 +190,9 @@ let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
 let countdownInterval: NodeJS.Timeout | null = null;
 let lastResetMinutes: number | null = null; // banner reset (minutes-of-day) of last countdown
 let lastFoundAt: number = 0;                 // wall-clock time we started that countdown
-let ghostCooldownUntil: number = 0;          // no /usage re-check before this time
+let disprovedResetMinutes: number | null = null; // banner reset /usage said wasn't a limit
+let disprovedAt: number = 0;                     // wall-clock time /usage disproved it
+let usageRetryUntil: number = 0;             // no /usage re-read before this (read failed)
 let captureInterval: NodeJS.Timeout | null = null;
 let currentScreen: string = '';
 
@@ -419,20 +427,31 @@ function detectLimit(screen: string): void {
     const match = screen.match(limitRegex);
     if (!match) return;
 
+    const bannerMinutes = resetMinutes(match);
+
     // Skip a reset we've already counted down to (a stale banner re-appearing
     // after we resumed), unless the repeat window has passed — by then the same
     // clock time is a new day's limit.
     if (lastResetMinutes !== null &&
-        resetMinutes(match) === lastResetMinutes &&
+        bannerMinutes === lastResetMinutes &&
         Date.now() - lastFoundAt < REPEAT_LIMIT_WINDOW_MS) {
         log('Same reset as last countdown — ignoring');
         return;
     }
 
-    // A banner we recently checked against /usage and found stale — don't keep
-    // popping the panel open for it.
-    if (Date.now() < ghostCooldownUntil) {
-        log('Limit text on screen but inside ghost cooldown — ignoring');
+    // This exact banner was already checked against /usage and disproved. Opening
+    // the panel again would only find the same answer, so leave it alone until a
+    // real limit re-arms detection or the window expires.
+    if (disprovedResetMinutes !== null &&
+        bannerMinutes === disprovedResetMinutes &&
+        Date.now() - disprovedAt < DISPROVED_LIMIT_WINDOW_MS) {
+        log('Same reset /usage already disproved — ignoring');
+        return;
+    }
+
+    // A previous /usage read failed; back off before opening the panel again.
+    if (Date.now() < usageRetryUntil) {
+        log('Limit text on screen but inside /usage retry backoff — ignoring');
         return;
     }
 
@@ -440,7 +459,7 @@ function detectLimit(screen: string): void {
     // is only trusted when the Current session bar actually reads 100% used.
     log('Possible session limit — opening /usage to verify');
     isVerifying = true;
-    verifyViaUsage(resetMinutes(match))
+    verifyViaUsage(bannerMinutes)
         .catch(err => log(`/usage verification error: ${err}`))
         .finally(() => { isVerifying = false; });
 }
@@ -456,14 +475,15 @@ interface SessionUsage {
 async function verifyViaUsage(bannerMinutes: number): Promise<void> {
     const usage = await readSessionUsage();
     if (usage === null) {
-        ghostCooldownUntil = Date.now() + GHOST_COOLDOWN_MS;
-        log('Could not read the Current session block from /usage — will retry after cooldown');
+        usageRetryUntil = Date.now() + USAGE_RETRY_COOLDOWN_MS;
+        log('Could not read the Current session block from /usage — will retry after backoff');
         return;
     }
     log(`/usage read: session ${usage.percentUsed}% used, resets at minutes-of-day ${usage.resetMinutesOfDay}`);
     if (usage.percentUsed < USAGE_CONFIRM_PCT) {
-        ghostCooldownUntil = Date.now() + GHOST_COOLDOWN_MS;
-        log('Session below 100% — banner is stale, ignoring');
+        disprovedResetMinutes = bannerMinutes;
+        disprovedAt = Date.now();
+        log('Session below 100% — banner is stale, ignoring this reset from now on');
         return;
     }
     startCountdown(usage.resetMinutesOfDay, bannerMinutes);
@@ -558,6 +578,12 @@ function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void
     lastResetMinutes = bannerMinutes;
     lastFoundAt = Date.now();
 
+    // A real limit ends the disproof: whatever banner we'd written off belongs to
+    // a session that's over, so the next one gets verified again.
+    disprovedResetMinutes = null;
+    disprovedAt = 0;
+    usageRetryUntil = 0;
+
     // From here on the title is ours; restoreTitle() hands it back.
     titleOverridden = true;
 
@@ -614,7 +640,9 @@ function cancelCountdown(): void {
     isWaiting = false;
     lastResetMinutes = null;
     lastFoundAt = 0;
-    ghostCooldownUntil = 0;
+    disprovedResetMinutes = null;
+    disprovedAt = 0;
+    usageRetryUntil = 0;
     log('Countdown cancelled (F4) — reset cleared, detection re-armed');
 }
 
