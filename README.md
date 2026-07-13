@@ -55,17 +55,33 @@ claude-auto --permission-mode auto  # same as `claude --permission-mode auto`
 So the only change to your workflow is the command you type. You can alias it and forget
 it's there:
 
-```bash
-alias claude=claude-auto                 # bash / zsh — add to ~/.bashrc or ~/.zshrc
+```
+# bash
+alias claude=claude-auto
+
+# powershell
+Set-Alias claude claude-auto
+
+# bat
+doskey claude=claude-auto $*
 ```
 
-```powershell
-Set-Alias claude claude-auto             # PowerShell — add to $PROFILE
+
+### Always starting in auto mode
+
+Set `CLAUDE_AUTO_PERMISSION_MODE` and every session starts in that mode.
+`claude-auto` forwards it as `--permission-mode <mode>`. Restart your terminal after setting it:
+
+```
+# bash:
+export CLAUDE_AUTO_PERMISSION_MODE=auto
+
+# powershell
+$env:CLAUDE_AUTO_PERMISSION_MODE = 'auto'
 ```
 
-```bat
-doskey claude=claude-auto $*             :: cmd.exe
-```
+Unset the variable to turn it off.
+
 
 ### Flags
 
@@ -76,34 +92,16 @@ never collide with a real `claude` flag, and it's stripped before forwarding.
 |:---------------|:------------------------------------------------------------------------------|
 | `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
-### Always starting in a permission mode
 
-Set `CLAUDE_AUTO_PERMISSION_MODE` and every session starts in that mode —
-`claude-auto` forwards it as `--permission-mode <mode>`:
-
-```bash
-export CLAUDE_AUTO_PERMISSION_MODE=auto   # bash / zsh — add to ~/.bashrc or ~/.zshrc
-```
-
-```powershell
-$env:CLAUDE_AUTO_PERMISSION_MODE = 'auto' # PowerShell — add to $PROFILE
-```
-
-It's only a default. Passing `--permission-mode` (or
-`--dangerously-skip-permissions`, which `claude` won't take alongside a mode) on
-the command line wins, so a single session can still opt out:
-
-```bash
-claude-auto --permission-mode plan        # this session plans, whatever the env var says
-```
-
-Unset the variable to turn it off.
 
 ### Cancelling a countdown
 
 Press <kbd>F4</kbd> while a countdown is running to cancel it and hand the
 session back to you. Detection re-arms immediately, so the same limit can be
 picked up again.
+- On macOS, <kbd>F4</kbd> is a system key unless `Use F1, F2, etc. keys as
+  standard function keys` is enabled in Settings, so countdown cancelling may
+  not reach the wrapper.
 
 ## How auto-resume works
 
@@ -147,22 +145,14 @@ Some more details:
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all
   diagnostics go to the optional log file.
 
-### Debug logging
-
-```bash
-claude-auto --auto-debug
-```
-
-Writes `claude-auto.log` in the working directory: a screen snapshot every 2
-seconds, plus every decision the limit detector made. Without the flag, nothing
-is logged.
-
 ## License
 
 [MIT](LICENSE) © Philipp Köhler
 
 ---
 
+<details>
+<summary>Dev Notes</summary>
 <!-- ─────────────────────────────────────────────────────────────────────────
      Everything below this line is for contributors and maintainers.
      ───────────────────────────────────────────────────────────────────── -->
@@ -179,16 +169,7 @@ bun run build           # emit dist/auto-claude.js
 The run path uses [`tsx`](https://github.com/privatenumber/tsx), which transpiles
 without type-checking, so `bun run typecheck` is a separate step.
 
-On Windows, `claude-auto.cmd` runs the local source without installing anything.
-
-### Layout
-
-| Path                            | Purpose                                                        |
-|:--------------------------------|:---------------------------------------------------------------|
-| `auto-claude.ts`                | The entire wrapper, pty spawn, screen capture, limit detection |
-| `tsconfig.json`                 | Type-check config (`noEmit`)                                   |
-| `tsconfig.build.json`           | Emit config used by `bun run build`                            |
-| `.github/workflows/release.yml` | Publishes on version bump                                      |
+On Windows, `claude-auto.cmd` runs the local source without installing anything.                                 |
 
 ## Publishing
 
@@ -223,8 +204,5 @@ Notes for whoever picks the name:
   `--provenance` to the publish step and `id-token: write` to the job's
   `permissions`.
 
-### Platform support
 
-- On macOS, <kbd>F4</kbd> is a system key unless *Use F1, F2, etc. keys as
-  standard function keys* is enabled in Settings, so countdown cancelling may
-  not reach the wrapper.
+</details>
