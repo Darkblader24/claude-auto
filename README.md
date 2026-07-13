@@ -94,12 +94,16 @@ When a session-limit banner appears:
 
 1. **If Claude is offering its "Stop and wait for limit to reset" menu**, it
    selects that option for you.
-2. **Otherwise it confirms the limit is real.** It sends a `continue` probe and
-   re-reads the screen, counting only limit text that appears *below* the probe.
-   A stale banner sitting in scrollback can't trigger a false positive.
-3. **Then it waits.** It counts down to the reset time (plus a one-minute safety
-   buffer), showing the remaining time in your window title, and sends `continue`
-   when the clock runs out.
+2. **Otherwise it confirms the limit against `/usage`.** It opens Claude's
+   `/usage` panel and reads the *Current session* block — percent used and reset
+   time. Only a bar at **100% used** confirms the limit, so a stale banner on
+   screen can't trigger a false positive. If the window is too small to show the
+   block, the panel is scrolled step by step until both values have been read.
+   Then the panel is closed with Esc.
+3. **Then it waits.** It counts down to the reset time reported by `/usage`
+   (plus a one-minute safety buffer) — more precise than the rounded time in the
+   banner — showing the remaining time in your window title, and sends
+   `continue` when the clock runs out.
 
 A few details that keep it honest:
 
@@ -113,6 +117,11 @@ A few details that keep it honest:
   the moment you've answered.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
+- A banner that `/usage` disproves (session below 100%) isn't re-checked for
+  5 minutes, so the panel doesn't keep popping open over a stale banner.
+- The weekly rows in `/usage` also say "% used", but only text between the
+  *Current session* heading and the next section is ever parsed, so they can't
+  be mistaken for the session bar.
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all
   diagnostics go to the log file.
 

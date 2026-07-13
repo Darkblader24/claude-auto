@@ -32,7 +32,7 @@ const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2}
 // (press Enter) so the session parks until reset. Wait briefly so the menu has
 // fully rendered, then ignore it for a grace period so the redraw doesn't make
 // us press Enter twice.
-const MENU_PROMPT_TEXT: string = 'stop and wait for limit to reset';
+const MENU_PROMPT_TEXT: string = '❯ stop and wait for limit to reset';
 const MENU_ENTER_DELAY_MS: number = 2000;
 const MENU_GRACE_MS: number = 5000;
 
@@ -49,16 +49,47 @@ const SCROLL_INDICATOR: string = ') ↓';
 // we're resuming is usually still on screen behind it, so detection would fire
 // right into the menu. While the question is up we type nothing at all.
 // Matched against the first option's label: short enough not to wrap.
-const RESUME_PROMPT_TEXT: string = 'resume from summary';
+const RESUME_PROMPT_TEXT: string = '❯ resume from summary';
 
-// To verify a candidate limit we send this probe message, then re-check the
-// screen. It doubles as a marker: only limit text appearing *after* the most
-// recent probe counts, so a stale banner above it is ignored.
-const VERIFY_PROBE: string = 'continue';
+// A candidate limit is verified through the /usage panel instead of a chat
+// probe: we open it, read the "Current session" block (percent used + reset
+// time), and close it again. The reset time shown there is authoritative —
+// banner times are rounded and the banner itself can be stale.
+const USAGE_COMMAND: string = '/usage';
+// Pause between typing the command and pressing Enter, so the slash-command
+// autocomplete has settled on /usage before we submit it.
+const USAGE_MENU_SETTLE_MS: number = 500;
+// Pause after Enter before the first read, so the panel has rendered.
+const USAGE_RENDER_DELAY_MS: number = 1500;
 
-// How long to wait after sending the probe before capturing the screen to check.
-const VERIFY_DELAY_MS: number = 5000;
-// Safety margin added on top of the parsed reset time before we resume.
+// Headings that bracket the block we read. The weekly rows below it also say
+// "% used", so anything past USAGE_NEXT_HEADING must never be matched.
+const USAGE_SESSION_HEADING: string = 'current session';
+const USAGE_NEXT_HEADING: string = 'current week';
+// "███ 54% used" and "Resets 11:50am (Europe/Berlin)". The weekly rows show a
+// date instead ("Resets Jul 15, 8am"), which the time-only regex skips.
+const usagePercentRegex: RegExp = /(\d{1,3})\s*%\s*used/i;
+const usageResetRegex: RegExp = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+
+// The panel confirms a limit only when the session bar reads 100% used.
+// Anything less means the banner that triggered us was stale.
+const USAGE_CONFIRM_PCT: number = 100;
+
+// When the window is too small to show the whole block at once, we scroll the
+// panel one step at a time (down arrow) and re-read, up to this many steps.
+const USAGE_SCROLL_KEY: string = '\x1b[B';
+const USAGE_SCROLL_DELAY_MS: number = 300;
+const USAGE_MAX_SCROLL_STEPS: number = 40;
+
+// Esc closes the panel; give the main screen a moment to redraw afterwards.
+const USAGE_CLOSE_KEY: string = '\x1b';
+const USAGE_CLOSE_DELAY_MS: number = 500;
+
+// After a verification that came back "not at the limit" (a stale banner still
+// on screen), don't re-open /usage for this long — the popup is disruptive.
+const GHOST_COOLDOWN_MS: number = 5 * 60 * 1000;
+
+// Safety margin added on top of the /usage reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
 
 // A reset we've already counted down to is ignored if it shows up again within
@@ -145,11 +176,12 @@ const term = new Terminal({ cols, rows, allowProposedApi: true });
 // DETECTION STATE
 // ==========================================
 let isWaiting: boolean = false;     // a confirmed limit countdown is running
-let isVerifying: boolean = false;   // inside the post-probe verify window
+let isVerifying: boolean = false;   // /usage panel is open for verification
 let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
 let countdownInterval: NodeJS.Timeout | null = null;
-let lastResetMinutes: number | null = null; // reset (minutes-of-day) of last countdown
+let lastResetMinutes: number | null = null; // banner reset (minutes-of-day) of last countdown
 let lastFoundAt: number = 0;                 // wall-clock time we started that countdown
+let ghostCooldownUntil: number = 0;          // no /usage re-check before this time
 let captureInterval: NodeJS.Timeout | null = null;
 let currentScreen: string = '';
 
@@ -205,6 +237,10 @@ function captureScreen(): string {
     return lines.join('\n');
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ==========================================
 // CLEANUP / TEARDOWN
 // ==========================================
@@ -253,15 +289,22 @@ function main(): void {
 main();
 
 function onScreenCapture(): void {
-    log('===== screen =====\n' + currentScreen + '\n===== end screen =====');
+    logScreen();
     detectLimit(currentScreen);
+}
+
+function logScreen(screen: string = currentScreen, msg: string = "SCREEN"): void {
+    log(msg +
+      '\n##################################################' +
+      '\n' + screen +
+      '\n##################################################');
 }
 
 // ==========================================
 // LIMIT DETECTION
 // ==========================================
-// Parse a limit match's reset clock time into minutes-of-day (0–1439). Used both
-// to identify a reset (for the repeat guard) and to schedule the countdown.
+// Parse a reset clock time match into minutes-of-day (0–1439). Both the banner
+// regex and the /usage regex capture (hours)(:minutes)(am/pm) in groups 1–3.
 function resetMinutes(match: RegExpMatchArray): number {
     let hours: number = parseInt(match[1]!, 10);
     const minutes: number = match[2] ? parseInt(match[2], 10) : 0;
@@ -271,16 +314,8 @@ function resetMinutes(match: RegExpMatchArray): number {
     return hours * 60 + minutes;
 }
 
-// Only session-limit text *after* the most recent probe counts; anything above
-// the probe is stale. Returns the slice after the last probe occurrence, or all
-// of `text` when the probe isn't on screen.
-function afterProbe(text: string): string {
-    const idx = text.lastIndexOf(VERIFY_PROBE);
-    return idx === -1 ? text : text.slice(idx + VERIFY_PROBE.length);
-}
-
 // True while Claude's resume-from-summary question is on screen. Answering it is
-// the user's call, so we send nothing — not the probe, not the resume.
+// the user's call, so we send nothing — not /usage, not the resume.
 function hasResumePrompt(screen: string): boolean {
     return screen.toLowerCase().includes(RESUME_PROMPT_TEXT);
 }
@@ -300,7 +335,7 @@ function detectLimit(screen: string): void {
 
     // Auto-select Claude's "Stop and wait for limit to reset" menu when shown.
     // While the menu is on screen we never run limit detection (it would type
-    // "continue" into the menu), so handle it here and bail out.
+    // "/usage" into the menu), so handle it here and bail out.
     if (screen.toLowerCase().includes(MENU_PROMPT_TEXT)) {
         isHandlingMenu = true;
         log('Menu detected — selecting "Stop and wait for limit to reset"');
@@ -313,8 +348,7 @@ function detectLimit(screen: string): void {
         return;
     }
 
-    // Ignore any limit text above the most recent probe; only what's below counts.
-    const match = afterProbe(screen).match(limitRegex);
+    const match = screen.match(limitRegex);
     if (!match) return;
 
     // Skip a reset we've already counted down to (a stale banner re-appearing
@@ -327,38 +361,140 @@ function detectLimit(screen: string): void {
         return;
     }
 
-    // Candidate limit on the live screen. Confirm it by sending the probe, then
-    // after VERIFY_DELAY_MS re-checking the screen below the probe for a limit.
-    log('Possible session limit — sending verify probe');
-    isVerifying = true;
-    ptyProcess.write(CLEAR_INPUT_SEQUENCE + VERIFY_PROBE + '\r');
+    // A banner we recently checked against /usage and found stale — don't keep
+    // popping the panel open for it.
+    if (Date.now() < ghostCooldownUntil) {
+        log('Limit text on screen but inside ghost cooldown — ignoring');
+        return;
+    }
 
-    setTimeout(() => {
-        isVerifying = false;
-        const confirm = afterProbe(captureScreen()).match(limitRegex);
-        if (confirm) {
-            log('Limit re-appeared after probe — confirmed real');
-            startCountdown(confirm);
-        } else {
-            log('No limit after probe — treating as ghost, ignoring');
-        }
-    }, VERIFY_DELAY_MS);
+    // Candidate limit on the live screen. Confirm it against /usage: the banner
+    // is only trusted when the Current session bar actually reads 100% used.
+    log('Possible session limit — opening /usage to verify');
+    isVerifying = true;
+    verifyViaUsage(resetMinutes(match))
+        .catch(err => log(`/usage verification error: ${err}`))
+        .finally(() => { isVerifying = false; });
 }
 
-function startCountdown(match: RegExpMatchArray): void {
+// ==========================================
+// /usage VERIFICATION
+// ==========================================
+interface SessionUsage {
+    percentUsed: number;
+    resetMinutesOfDay: number;
+}
+
+async function verifyViaUsage(bannerMinutes: number): Promise<void> {
+    const usage = await readSessionUsage();
+    if (usage === null) {
+        ghostCooldownUntil = Date.now() + GHOST_COOLDOWN_MS;
+        log('Could not read the Current session block from /usage — will retry after cooldown');
+        return;
+    }
+    log(`/usage read: session ${usage.percentUsed}% used, resets at minutes-of-day ${usage.resetMinutesOfDay}`);
+    if (usage.percentUsed < USAGE_CONFIRM_PCT) {
+        ghostCooldownUntil = Date.now() + GHOST_COOLDOWN_MS;
+        log('Session below 100% — banner is stale, ignoring');
+        return;
+    }
+    startCountdown(usage.resetMinutesOfDay, bannerMinutes);
+}
+
+// Open the /usage panel and read the "Current session" block. When the window
+// is too small to show the whole block, scroll the panel one step at a time and
+// keep reading until both the percentage and the reset time have been seen.
+// Always closes the panel (Esc) before returning.
+async function readSessionUsage(): Promise<SessionUsage | null> {
+    ptyProcess.write(CLEAR_INPUT_SEQUENCE + USAGE_COMMAND);
+    await sleep(USAGE_MENU_SETTLE_MS);
+    ptyProcess.write('\r');
+    await sleep(USAGE_RENDER_DELAY_MS);
+
+    let seenHeading = false;
+    let percentUsed: number | null = null;
+    let resetMinutesOfDay: number | null = null;
+    let previousScreen: string | null = null;
+
+    for (let step = 0; step <= USAGE_MAX_SCROLL_STEPS; step++) {
+        const screen = captureScreen();
+        logScreen(screen, `/usage screen (scroll step ${step})`);
+
+        // A scroll that changed nothing means we're at the bottom of the panel;
+        // whatever we haven't found by now isn't there.
+        if (screen === previousScreen) {
+            log('/usage screen unchanged after scroll — reached the bottom');
+            break;
+        }
+        previousScreen = screen;
+
+        // Only text between "Current session" and the next section counts: the
+        // weekly rows below also say "% used" and must never be picked up. Once
+        // the heading has scrolled off the top, the block's remaining lines are
+        // at the top of the panel, so the whole screen becomes the region.
+        let region: string | null = null;
+        const headingIdx = screen.toLowerCase().indexOf(USAGE_SESSION_HEADING);
+        if (headingIdx !== -1) {
+            seenHeading = true;
+            region = screen.slice(headingIdx);
+        } else if (seenHeading) {
+            region = screen;
+        }
+        if (region !== null) {
+            const nextIdx = region.toLowerCase().indexOf(USAGE_NEXT_HEADING);
+            if (nextIdx !== -1) region = region.slice(0, nextIdx);
+            if (percentUsed === null) {
+                const m = region.match(usagePercentRegex);
+                if (m) percentUsed = parseInt(m[1]!, 10);
+            }
+            if (resetMinutesOfDay === null) {
+                const m = region.match(usageResetRegex);
+                if (m) resetMinutesOfDay = resetMinutes(m);
+            }
+            if (percentUsed !== null && resetMinutesOfDay !== null) break;
+        }
+
+        if (step < USAGE_MAX_SCROLL_STEPS) {
+            ptyProcess.write(USAGE_SCROLL_KEY);
+            await sleep(USAGE_SCROLL_DELAY_MS);
+        }
+    }
+
+    // log("Closing the window")
+    // ptyProcess.write(USAGE_CLOSE_KEY);
+    // ptyProcess.write(USAGE_CLOSE_KEY);
+    // await sleep(USAGE_CLOSE_DELAY_MS);
+    // ptyProcess.write(' \x08');
+    // await sleep(200);
+    // log("Window closed")
+
+    log("Closing the window")
+    ptyProcess.write(USAGE_CLOSE_KEY);
+    await sleep(100);
+    ptyProcess.write('\x1b[<35;1;1M');
+    await sleep(USAGE_CLOSE_DELAY_MS);
+    log("Window closed")
+
+    if (percentUsed === null || resetMinutesOfDay === null) return null;
+    return { percentUsed, resetMinutesOfDay };
+}
+
+// The countdown target comes from /usage; the banner's own reset time is kept
+// separately because the *banner* is what re-appears on screen — the repeat
+// guard in detectLimit compares against it.
+function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void {
     isWaiting = true;
 
     // Remember this reset (and when we found it) so the same banner re-appearing
     // after we resume doesn't trigger a second countdown (see detectLimit).
-    const minutesOfDay = resetMinutes(match);
-    lastResetMinutes = minutesOfDay;
+    lastResetMinutes = bannerMinutes;
     lastFoundAt = Date.now();
 
     // Save the current window title so we can restore it after the countdown.
     process.stdout.write('\x1b[22;0t');
 
-    const hours = Math.floor(minutesOfDay / 60);
-    const minutes = minutesOfDay % 60;
+    const hours = Math.floor(targetMinutesOfDay / 60);
+    const minutes = targetMinutesOfDay % 60;
 
     const now = new Date();
     let targetTimeMs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0).getTime();
@@ -411,6 +547,7 @@ function cancelCountdown(): void {
     isWaiting = false;
     lastResetMinutes = null;
     lastFoundAt = 0;
+    ghostCooldownUntil = 0;
     log('Countdown cancelled (F4) — reset cleared, detection re-armed');
 }
 
