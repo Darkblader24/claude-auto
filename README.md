@@ -83,17 +83,6 @@ $env:CLAUDE_AUTO_PERMISSION_MODE = 'auto'
 Unset the variable to turn it off.
 
 
-### Flags
-
-`claude-auto` owns exactly one flag. It's namespaced with `--auto-` so it can
-never collide with a real `claude` flag, and it's stripped before forwarding.
-
-| Flag           | Effect                                                                        |
-|:---------------|:------------------------------------------------------------------------------|
-| `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
-
-
-
 ### Cancelling a countdown
 
 Press <kbd>F4</kbd> while a countdown is running to cancel it and hand the
@@ -103,6 +92,7 @@ picked up again.
   standard function keys` is enabled in Settings, so countdown cancelling may
   not reach the wrapper.
 
+
 ## License
 
 [MIT](LICENSE) © Philipp Köhler
@@ -111,6 +101,15 @@ picked up again.
 
 <details>
 <summary>Dev Notes</summary>
+
+### Flags
+
+`claude-auto` owns exactly one flag. It's namespaced with `--auto-` so it can
+never collide with a real `claude` flag, and it's stripped before forwarding.
+
+| Flag           | Effect                                                                        |
+|:---------------|:------------------------------------------------------------------------------|
+| `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
 ## How auto-resume works
 
