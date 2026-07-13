@@ -76,6 +76,29 @@ never collide with a real `claude` flag, and it's stripped before forwarding.
 |:---------------|:------------------------------------------------------------------------------|
 | `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
+### Always starting in a permission mode
+
+Set `CLAUDE_AUTO_PERMISSION_MODE` and every session starts in that mode —
+`claude-auto` forwards it as `--permission-mode <mode>`:
+
+```bash
+export CLAUDE_AUTO_PERMISSION_MODE=auto   # bash / zsh — add to ~/.bashrc or ~/.zshrc
+```
+
+```powershell
+$env:CLAUDE_AUTO_PERMISSION_MODE = 'auto' # PowerShell — add to $PROFILE
+```
+
+It's only a default. Passing `--permission-mode` (or
+`--dangerously-skip-permissions`, which `claude` won't take alongside a mode) on
+the command line wins, so a single session can still opt out:
+
+```bash
+claude-auto --permission-mode plan        # this session plans, whatever the env var says
+```
+
+Unset the variable to turn it off.
+
 ### Cancelling a countdown
 
 Press <kbd>F4</kbd> while a countdown is running to cancel it and hand the

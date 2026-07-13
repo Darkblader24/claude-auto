@@ -18,7 +18,29 @@ const WRAPPER_FLAGS: ReadonlySet<string> = new Set(['--auto-debug']);
 const DEBUG: boolean = process.argv.includes('--auto-debug');
 
 // Everything after `node auto-claude.ts`, minus our own flags.
-const forwardedArgs: string[] = process.argv.slice(2).filter(arg => !WRAPPER_FLAGS.has(arg));
+const cliArgs: string[] = process.argv.slice(2).filter(arg => !WRAPPER_FLAGS.has(arg));
+
+// A permission mode can be made permanent by exporting CLAUDE_AUTO_PERMISSION_MODE
+// (e.g. `auto`) from your shell profile: we forward it as `--permission-mode <mode>`
+// so every session starts in it. It's only a default — an explicit
+// `--permission-mode` on the command line wins, and we also stay out of the way of
+// `--dangerously-skip-permissions`, which claude rejects alongside a mode.
+const PERMISSION_MODE_ENV: string = 'CLAUDE_AUTO_PERMISSION_MODE';
+const PERMISSION_MODE_FLAG: string = '--permission-mode';
+const SKIP_PERMISSIONS_FLAG: string = '--dangerously-skip-permissions';
+
+function permissionModeArgs(args: string[]): string[] {
+    const mode: string = (process.env[PERMISSION_MODE_ENV] ?? '').trim();
+    if (mode === '') return [];
+    const alreadySet: boolean = args.some(arg =>
+        arg === PERMISSION_MODE_FLAG ||
+        arg.startsWith(`${PERMISSION_MODE_FLAG}=`) ||
+        arg === SKIP_PERMISSIONS_FLAG
+    );
+    return alreadySet ? [] : [PERMISSION_MODE_FLAG, mode];
+}
+
+const forwardedArgs: string[] = [...cliArgs, ...permissionModeArgs(cliArgs)];
 
 // ==========================================
 // CONFIG
@@ -354,6 +376,7 @@ ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
 
 function main(): void {
     log('===== START =====');
+    log(`Forwarding to claude: ${forwardedArgs.join(' ')}`);
     // Capture the screen state every x seconds
     captureInterval = setInterval(() => {
         // Already handling a limit (waiting it out or mid-verification) — do nothing.
