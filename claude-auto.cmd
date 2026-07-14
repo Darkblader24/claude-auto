@@ -1,2 +1,2 @@
 @echo off
-bunx tsx "%~dp0auto-claude.ts" %*
+bunx tsx "%~dp0claude-auto.ts" %*

@@ -193,7 +193,7 @@ Some more details:
 bun install
 bun run claude          # run from source via tsx
 bun run typecheck       # tsc --noEmit
-bun run build           # emit dist/auto-claude.js
+bun run build           # emit dist/claude-auto.js
 ```
 
 The run path uses [`tsx`](https://github.com/privatenumber/tsx), which transpiles

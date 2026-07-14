@@ -18,7 +18,7 @@ const WRAPPER_FLAGS: ReadonlySet<string> = new Set(['--auto-debug', AUTO_MODE_OF
 // Debug logging is opt-in via a flag (no env var). Pass --auto-debug.
 const DEBUG: boolean = process.argv.includes('--auto-debug');
 
-// Everything after `node auto-claude.ts`, minus our own flags.
+// Everything after `node claude-auto.ts`, minus our own flags.
 const cliArgs: string[] = process.argv.slice(2).filter(arg => !WRAPPER_FLAGS.has(arg));
 
 // Sessions start in auto mode: we forward `--permission-mode auto` by default, so

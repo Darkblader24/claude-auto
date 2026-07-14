@@ -17,7 +17,7 @@
   "homepage": "https://github.com/Darkblader24/claude-auto#readme",
   "type": "module",
   "bin": {
-    "claude-auto": "dist/auto-claude.js"
+    "claude-auto": "dist/claude-auto.js"
   },
   "files": [
     "dist",
@@ -39,7 +39,7 @@
     "node-pty": "^1.1.0"
   },
   "scripts": {
-    "claude": "bunx tsx auto-claude.ts",
+    "claude": "bunx tsx claude-auto.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc --project tsconfig.build.json",
     "prepack": "tsc --project tsconfig.build.json"

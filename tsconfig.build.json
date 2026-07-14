@@ -11,5 +11,7 @@
     // Only legal when nothing is emitted.
     "allowImportingTsExtensions": false
   },
-  "include": ["auto-claude.ts"]
+  "include": [
+    "claude-auto.ts"
+  ]
 }
