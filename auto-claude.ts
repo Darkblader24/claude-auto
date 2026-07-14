@@ -12,7 +12,8 @@ import { createRequire } from 'node:module';
 // recognise is forwarded verbatim to the real CLI. Our own flags are namespaced
 // with an `auto-` prefix so they can't collide with claude's (`claude --debug`
 // is a real flag), and they are stripped before forwarding.
-const WRAPPER_FLAGS: ReadonlySet<string> = new Set(['--auto-debug']);
+const AUTO_MODE_OFF_FLAG: string = '--no-auto-mode';
+const WRAPPER_FLAGS: ReadonlySet<string> = new Set(['--auto-debug', AUTO_MODE_OFF_FLAG]);
 
 // Debug logging is opt-in via a flag (no env var). Pass --auto-debug.
 const DEBUG: boolean = process.argv.includes('--auto-debug');
@@ -20,24 +21,24 @@ const DEBUG: boolean = process.argv.includes('--auto-debug');
 // Everything after `node auto-claude.ts`, minus our own flags.
 const cliArgs: string[] = process.argv.slice(2).filter(arg => !WRAPPER_FLAGS.has(arg));
 
-// A permission mode can be made permanent by exporting CLAUDE_AUTO_PERMISSION_MODE
-// (e.g. `auto`) from your shell profile: we forward it as `--permission-mode <mode>`
-// so every session starts in it. It's only a default — an explicit
-// `--permission-mode` on the command line wins, and we also stay out of the way of
-// `--dangerously-skip-permissions`, which claude rejects alongside a mode.
-const PERMISSION_MODE_ENV: string = 'CLAUDE_AUTO_PERMISSION_MODE';
+// Sessions start in auto mode: we forward `--permission-mode auto` by default, so
+// claude-auto doesn't stop to ask on every tool call — the point of the wrapper is
+// to keep going while you're away. Three things opt out of it:
+//   * --no-auto-mode, ours, for when you just want claude's own default;
+//   * an explicit --permission-mode, which is you naming a mode, so it wins;
+//   * --dangerously-skip-permissions, which claude rejects alongside a mode.
+const AUTO_MODE: string = 'auto';
 const PERMISSION_MODE_FLAG: string = '--permission-mode';
 const SKIP_PERMISSIONS_FLAG: string = '--dangerously-skip-permissions';
 
 function permissionModeArgs(args: string[]): string[] {
-    const mode: string = (process.env[PERMISSION_MODE_ENV] ?? '').trim();
-    if (mode === '') return [];
+    if (process.argv.includes(AUTO_MODE_OFF_FLAG)) return [];
     const alreadySet: boolean = args.some(arg =>
         arg === PERMISSION_MODE_FLAG ||
         arg.startsWith(`${PERMISSION_MODE_FLAG}=`) ||
         arg === SKIP_PERMISSIONS_FLAG
     );
-    return alreadySet ? [] : [PERMISSION_MODE_FLAG, mode];
+    return alreadySet ? [] : [PERMISSION_MODE_FLAG, AUTO_MODE];
 }
 
 const forwardedArgs: string[] = [...cliArgs, ...permissionModeArgs(cliArgs)];
@@ -468,6 +469,36 @@ function sleep(ms: number): Promise<void> {
 // ==========================================
 // CLEANUP / TEARDOWN
 // ==========================================
+// A TUI switches the terminal into modes a plain shell never uses: mouse
+// reporting, bracketed paste, a hidden cursor, a shrunk scroll region, the
+// alternate screen. Claude undoes its own when it shuts down cleanly, but a
+// killed session (or one whose final bytes we cut off) leaves them set, and the
+// shell inherits them — a stray mouse move then prints things like "[<35;1;1M".
+// So we put the terminal back ourselves. Every one of these is a no-op if the
+// mode was already off, which makes it safe to send unconditionally.
+//
+// Two of them move the cursor as a side effect, though, and would leave it at
+// the top of the window instead of on the line your prompt should return to:
+// resetting the scroll region homes the cursor, and leaving the alternate
+// screen restores the cursor saved when it was *entered* — stale, since Claude
+// has normally left the alt screen already by the time we get here. So the whole
+// block is bracketed in DECSC/DECRC (ESC 7 / ESC 8), which puts the cursor back
+// where the exiting session left it. DECRC also restores the attributes DECSC
+// saved, so the SGR reset has to come after it, not inside.
+const TERMINAL_RESET: string =
+    '\x1b7' +                                                    // save cursor (position + attrs)
+    '\x1b[?1049l' +                                              // leave the alternate screen
+    '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l' +  // all mouse reporting off
+    '\x1b[?2004l' +                                              // bracketed paste off
+    '\x1b[?7h' +                                                 // autowrap back on
+    '\x1b[?25h' +                                                // cursor visible again
+    '\x1b[r' +                                                   // scroll region = whole window
+    '\x1b8' +                                                    // and put the cursor back
+    '\x1b[0m';                                                   // drop leftover colours/attrs
+
+// How long we let stdout drain before giving up and exiting anyway.
+const FLUSH_TIMEOUT_MS: number = 500;
+
 let cleanedUp = false;
 function cleanup(): void {
     if (cleanedUp) return;
@@ -482,19 +513,39 @@ function cleanup(): void {
     }
     restoreTitle();
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch { /* terminal already gone */ }
-    // Last thing we do: the pty is gone, so the screen is finally safe to write to.
+    process.stdin.pause();
+    // From here on the pty is gone, so the screen is finally ours to write to.
+    try { process.stdout.write(TERMINAL_RESET); } catch { /* terminal already gone */ }
     printUpdateNotice();
+}
+
+// process.exit() drops anything still queued on stdout, and on Windows a TTY
+// stdout is *asynchronous* — so exiting the instant the pty dies truncates the
+// tail of Claude's output mid-escape-sequence and leaves the wreckage on screen.
+// Wait for the queue to flush first. The timeout is the backstop for a terminal
+// that has stopped draining (closed window, dead ssh link), which must not hang us.
+function exitAfterFlush(code: number): void {
+    let exited: boolean = false;
+    const done = (): void => {
+        if (exited) return;
+        exited = true;
+        clearTimeout(timer);
+        process.exit(code);
+    };
+    const timer: NodeJS.Timeout = setTimeout(done, FLUSH_TIMEOUT_MS);
+    // An empty write's callback fires once everything queued ahead of it is out.
+    process.stdout.write('', () => done());
 }
 
 process.on('exit', cleanup);
 // In raw mode Ctrl-C is forwarded to Claude as \x03, so these handlers only fire
 // for out-of-band signals — they won't swallow the user's Ctrl-C.
-process.on('SIGINT', () => { cleanup(); process.exit(0); });
-process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+process.on('SIGINT', () => { cleanup(); exitAfterFlush(0); });
+process.on('SIGTERM', () => { cleanup(); exitAfterFlush(0); });
 
 ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
     cleanup();
-    process.exit(exitCode);
+    exitAfterFlush(exitCode);
 });
 
 // ==========================================

@@ -8,9 +8,9 @@
 `claude-auto` automatically waits out the reset and picks up right where you left off.
 
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![npm](https://img.shields.io/npm/v/@hotox/claude-auto.svg)](https://www.npmjs.com/package/@hotox/claude-auto)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#platform-support)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
@@ -21,6 +21,8 @@ Claude's output untouched, so the TUI looks and behaves **exactly** as it always
 The difference: when Claude reports that you've hit your session limit, `claude-auto` sends
 a quick `/usage` command to confirm the limit, counts it down in your window title, and sends `continue` 
 the moment your quota is back. No babysitting, no lost context.
+
+The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/package/@hotox/claude-auto).
 
 ---
 </div>
@@ -76,11 +78,10 @@ quietly stops auto-resuming.
 ```bash
 claude-auto                         # same as `claude`
 claude-auto -p "explain this"       # same as `claude -p "explain this"`
-claude-auto --permission-mode auto  # same as `claude --permission-mode auto`
+claude-auto --permission-mode plan  # same as `claude --permission-mode plan`
 ```
 
-So the only change to your workflow is the command you type. You can alias it and forget
-it's there:
+You can alias `claude-auto` to `claude`, so it gets:
 
 ```
 # bash
@@ -94,20 +95,19 @@ doskey claude=claude-auto $*
 ```
 
 
-### Always starting in auto mode
+### Auto mode
 
-Set `CLAUDE_AUTO_PERMISSION_MODE` and every session starts in that mode.
-`claude-auto` forwards it as `--permission-mode <mode>`. Restart your terminal after setting it:
+`claude-auto` sessions start automatically in auto mode. A wrapper whose whole
+job is to keep working while you're away shouldn't then stop to ask permission
+for every tool call, so `claude-auto` passes `--permission-mode auto` for you.
+
+Here are three ways to override this:
 
 ```
-# bash:
-export CLAUDE_AUTO_PERMISSION_MODE=auto
-
-# powershell
-$env:CLAUDE_AUTO_PERMISSION_MODE = 'auto'
+claude-auto --no-auto-mode                   # starts Claude using the default mode
+claude-auto --permission-mode plan           # starts in any mode (here in plan mode)
+claude-auto --dangerously-skip-permissions
 ```
-
-Unset the variable to turn it off.
 
 
 ### Cancelling a countdown
@@ -131,18 +131,18 @@ picked up again.
 
 ### Flags
 
-`claude-auto` owns exactly one flag. It's namespaced with `--auto-` so it can
-never collide with a real `claude` flag, and it's stripped before forwarding.
+`claude-auto` owns these two flags. Both are stripped before forwarding;
+everything else you pass goes to `claude` verbatim.
 
-| Flag           | Effect                                                                        |
-|:---------------|:------------------------------------------------------------------------------|
-| `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
+| Flag             | Effect                                                                        |
+|:-----------------|:------------------------------------------------------------------------------|
+| `--no-auto-mode` | Don't pass `--permission-mode auto` — start in claude's own default mode      |
+| `--auto-debug`   | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
 ### Environment variables
 
 | Variable                      | Effect                                                           |
 |:------------------------------|:-----------------------------------------------------------------|
-| `CLAUDE_AUTO_PERMISSION_MODE` | Start every session in this permission mode                      |
 | `CLAUDE_AUTO_NO_UPDATE_CHECK` | Set to `1` to disable the daily update check and the exit notice |
 
 ## How auto-resume works
@@ -212,19 +212,5 @@ The workflow type-checks, builds, publishes to npm, tags `v<version>`, and creat
 a GitHub Release with generated notes.
 
 It needs an npm automation token in the repo secret `NPM_TOKEN` (`gh secret set NPM_TOKEN`).
-
-Notes:
-
-- The installed binary is always `claude-auto`, independent of the package name.
-- npm cannot rename a published package. If you outgrow the name, publish under
-  the new one and `npm deprecate <old> "moved to <new>"`.
-- The unscoped name `claude-auto` was published and unpublished by someone on
-  2026-04-26. npm blocks reuse of unpublished names, which is why the package is
-  scoped.
-- [Provenance](https://docs.npmjs.com/generating-provenance-statements) is off
-  because it requires a public repo. If you make this repo public, add
-  `--provenance` to the publish step and `id-token: write` to the job's
-  `permissions`.
-
 
 </details>

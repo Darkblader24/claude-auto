@@ -58,6 +58,8 @@ jobs:
       contents: write # create the tag and the GitHub Release
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release notes are built from the log since the last tag
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -96,6 +98,42 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
+      # Notes come from the commit log, not from `gh --generate-notes`: that one
+      # only lists merged PRs, and this repo is pushed to directly, so it would
+      # produce an empty changelog.
+      - name: Build the release notes from the commit history
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+
+          if [ -n "$prev" ]; then
+            range="$prev..HEAD"
+            echo "Collecting commits in $range"
+          else
+            range="HEAD"
+            echo "No previous v* tag — using the full history."
+          fi
+
+          # --no-merges: merge commits carry no content of their own.
+          commits=$(git log --no-merges --reverse \
+            --format='- %s ([%h](${{ github.server_url }}/${{ github.repository }}/commit/%H))' "$range")
+
+          {
+            echo "## What's changed"
+            echo
+            # Can happen if the tag lands on a commit already covered by the last release.
+            echo "${commits:-_No commits since the previous release._}"
+            echo
+            if [ -n "$prev" ]; then
+              echo "**Full changelog**: ${{ github.server_url }}/${{ github.repository }}/compare/$prev...v$VERSION"
+            fi
+          } > release-notes.md
+
+          echo "--- release notes ---"
+          cat release-notes.md
+
       - name: Tag and create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,4 +144,4 @@ jobs:
           git push origin "v$VERSION"
           gh release create "v$VERSION" \
             --title "v$VERSION" \
-            --generate-notes
+            --notes-file release-notes.md
