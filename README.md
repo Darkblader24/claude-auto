@@ -81,18 +81,21 @@ claude-auto -p "explain this"       # same as `claude -p "explain this"`
 claude-auto --permission-mode plan  # same as `claude --permission-mode plan`
 ```
 
-You can alias `claude-auto` to `claude`, so it gets:
+### Aliasing it to `claude`
 
+Make `claude` mean `claude-auto`, permanently:
+
+```bash
+claude-auto --install-alias     # --uninstall-alias to undo it
 ```
-# bash
-alias claude=claude-auto
 
-# powershell
-Set-Alias claude claude-auto
+It writes the alias into your shell's startup file (`~/.zshrc`, `~/.bashrc`,
+`config.fish`, PowerShell's `$PROFILE` — it picks the right one and tells you
+which), so every new shell has it. Safe to re-run. Open a new shell afterwards.
 
-# bat
-doskey claude=claude-auto $*
-```
+Not supported for `cmd.exe`: `doskey` has no startup file, so a permanent macro
+needs a registry key that runs for every `cmd` session on the machine. Use
+PowerShell.
 
 
 ### Auto mode
@@ -131,13 +134,19 @@ picked up again.
 
 ### Flags
 
-`claude-auto` owns these two flags. Both are stripped before forwarding;
-everything else you pass goes to `claude` verbatim.
+`claude-auto` owns these flags. None of them reach `claude`; everything else you
+pass goes to it verbatim.
 
-| Flag             | Effect                                                                        |
-|:-----------------|:------------------------------------------------------------------------------|
-| `--no-auto-mode` | Don't pass `--permission-mode auto` — start in claude's own default mode      |
-| `--auto-debug`   | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
+| Flag                | Effect                                                                        |
+|:--------------------|:------------------------------------------------------------------------------|
+| `--no-auto-mode`    | Don't pass `--permission-mode auto` — start in claude's own default mode      |
+| `--auto-debug`      | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
+| `--install-alias`   | Write `claude` → `claude-auto` into your shell's startup file, then exit      |
+| `--uninstall-alias` | Remove that alias again, then exit                                            |
+
+The first two are stripped before forwarding and the session runs as usual. The
+alias flags don't start a session at all: they edit the file, report what they
+did, and exit.
 
 ### Environment variables
 

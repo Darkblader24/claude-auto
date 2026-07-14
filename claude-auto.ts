@@ -3,6 +3,7 @@ import * as pty from 'node-pty';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { createRequire } from 'node:module';
 
 // ==========================================
@@ -269,6 +270,224 @@ function printUpdateNotice(): void {
 }
 
 // ==========================================
+// ALIAS INSTALL
+// ==========================================
+// `alias claude=claude-auto` typed at a prompt lives and dies with that shell —
+// on every platform, Linux included. No shell persists an alias for you (fish's
+// `alias --save` is the one exception), so to make it stick the line has to sit
+// in a startup file the shell re-reads on every launch. --install-alias puts it
+// there, --uninstall-alias takes it back out.
+//
+// The line is fenced between markers, which is what makes both idempotent: we
+// only ever rewrite what's between our own markers, so re-installing doesn't
+// stack up duplicates and uninstalling can't take a line the user wrote with it.
+const ALIAS_INSTALL_FLAG: string = '--install-alias';
+const ALIAS_UNINSTALL_FLAG: string = '--uninstall-alias';
+const ALIAS_BEGIN: string = '# >>> claude-auto alias >>>';
+const ALIAS_END: string = '# <<< claude-auto alias <<<';
+
+interface AliasTarget {
+    shell: string;  // what to call it when we report back
+    file: string;   // the startup file to edit
+    line: string;   // the alias, in that shell's syntax
+    reload: string; // how to pick it up without opening a new shell
+}
+
+// Which file a POSIX shell actually re-reads on launch. Nothing here is a guess
+// we can make from the OS alone — it's the shell that decides, so we read $SHELL.
+function posixTarget(): AliasTarget | null {
+    const name: string = path.basename(process.env.SHELL ?? '');
+    const home: string = os.homedir();
+
+    if (name.includes('fish')) {
+        const file: string = path.join(home, '.config', 'fish', 'config.fish');
+        return { shell: 'fish', file, line: 'alias claude claude-auto', reload: `source ${file}` };
+    }
+    if (name.includes('zsh')) {
+        // ZDOTDIR moves the whole zsh config elsewhere; when it's set, .zshrc there is the one being read.
+        const file: string = path.join(process.env.ZDOTDIR || home, '.zshrc');
+        return { shell: 'zsh', file, line: "alias claude='claude-auto'", reload: `source ${file}` };
+    }
+    if (name.includes('bash')) {
+        // On macOS, Terminal.app opens *login* shells, which read .bash_profile and
+        // never .bashrc. Everywhere else .bashrc is the interactive-shell file.
+        const file: string = path.join(home, os.platform() === 'darwin' ? '.bash_profile' : '.bashrc');
+        return { shell: 'bash', file, line: "alias claude='claude-auto'", reload: `source ${file}` };
+    }
+    return null;
+}
+
+// PowerShell knows where its own profile lives ($PROFILE), and the path isn't
+// reliably derivable from outside — Documents can be redirected to OneDrive, and
+// pwsh and Windows PowerShell use different folders. So we ask each one that's
+// installed, and install into every profile we get back: the user may well use both.
+function powershellTargets(): AliasTarget[] {
+    const targets: AliasTarget[] = [];
+    for (const exe of ['pwsh', 'powershell']) {
+        try {
+            const file: string = execFileSync(exe, ['-NoProfile', '-Command', '$PROFILE'], {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore']
+            }).trim();
+            // Same profile from both exes would mean editing one file twice.
+            if (file && !targets.some(t => t.file === file)) {
+                targets.push({
+                    shell: exe,
+                    file,
+                    line: 'Set-Alias claude claude-auto',
+                    reload: `. $PROFILE`
+                });
+            }
+        } catch {
+            /* not installed, or refused to run — try the other one */
+        }
+    }
+    return targets;
+}
+
+function aliasTargets(): AliasTarget[] {
+    // The shell we were launched from decides this, not the platform: Git Bash and
+    // MSYS run on Windows, set $SHELL, and read the usual POSIX startup files. So a
+    // POSIX shell wins wherever we find one, and PowerShell is what "Windows, and no
+    // $SHELL" means. (cmd.exe also lands here — it has no startup file at all, which
+    // is why the empty-targets message below sends those users to PowerShell.)
+    const posix: AliasTarget | null = posixTarget();
+    if (posix) return [posix];
+    return os.platform() === 'win32' ? powershellTargets() : [];
+}
+
+// A startup file we didn't create is the user's file, so we leave its line
+// endings the way we found them — a PowerShell $PROFILE is normally CRLF, and
+// silently rewriting the whole thing to LF is not ours to do.
+function eolOf(text: string): string {
+    if (text === '') return os.EOL;
+    return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+// Drop our fenced block, if it's there. Everything outside the markers is the
+// user's and comes back out untouched.
+function stripAliasBlock(text: string): string {
+    const eol: string = eolOf(text);
+    const kept: string[] = [];
+    let inBlock: boolean = false;
+    for (const line of text.split(/\r?\n/)) {
+        if (!inBlock && line.trim() === ALIAS_BEGIN) { inBlock = true; continue; }
+        if (inBlock) {
+            if (line.trim() === ALIAS_END) inBlock = false;
+            continue;
+        }
+        kept.push(line);
+    }
+    // An unterminated block (someone deleted the end marker) would swallow the rest
+    // of the file, so in that case we keep the original and let the caller notice.
+    return inBlock ? text : kept.join(eol);
+}
+
+function readIfExists(file: string): string {
+    try {
+        return fs.readFileSync(file, 'utf8');
+    } catch {
+        return ''; // no startup file yet — a fresh PowerShell install has none
+    }
+}
+
+function writeAliasFile(file: string, content: string): void {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content, 'utf8');
+}
+
+// Both commands report to stdout: here the output *is* the point, and the pty
+// doesn't exist yet, so there's no TUI to corrupt. Returns the process exit code.
+function runAliasCommand(install: boolean): number {
+    const targets: AliasTarget[] = aliasTargets();
+    const out = (msg: string): void => { process.stdout.write(msg + '\n'); };
+
+    if (targets.length === 0) {
+        out(
+            "claude-auto: couldn't work out which shell to write to.\n" +
+            '  Add the alias to your shell\'s startup file by hand:\n' +
+            "    bash/zsh   alias claude='claude-auto'      (~/.bashrc, ~/.zshrc)\n" +
+            '    fish       alias --save claude claude-auto\n' +
+            '    PowerShell Set-Alias claude claude-auto    ($PROFILE)\n' +
+            '  cmd.exe has no startup file: a permanent doskey macro needs the\n' +
+            '  Command Processor AutoRun registry key. Use PowerShell instead.'
+        );
+        return 1;
+    }
+
+    let changed: number = 0;
+    for (const target of targets) {
+        const before: string = readIfExists(target.file);
+        const hasBlock: boolean = before.includes(ALIAS_BEGIN);
+
+        // Nothing of ours in the file: there is nothing to take out, and rewriting
+        // it just to reformat what's already there would be pure vandalism.
+        if (!install && !hasBlock) {
+            out(`claude-auto: nothing to do — no claude-auto alias in ${target.file}.`);
+            continue;
+        }
+
+        const stripped: string = stripAliasBlock(before);
+        if (hasBlock && stripped === before) {
+            out(`claude-auto: ${target.file} has an unterminated claude-auto block — fix it by hand.`);
+            continue;
+        }
+
+        // Uninstall is just the strip. Install re-appends, so an existing block is
+        // replaced rather than duplicated (and picks up any change to the syntax).
+        const eol: string = eolOf(before);
+        const body: string = stripped.replace(/\s+$/, '');
+        const after: string = install
+            ? `${body ? body + eol + eol : ''}${ALIAS_BEGIN}${eol}${target.line}${eol}${ALIAS_END}${eol}`
+            : (body ? body + eol : '');
+
+        if (after === before) {
+            out(`claude-auto: nothing to do — ${target.file} is already set up.`);
+            continue;
+        }
+
+        try {
+            writeAliasFile(target.file, after);
+        } catch (err) {
+            out(`claude-auto: couldn't write ${target.file} — ${String(err)}`);
+            return 1;
+        }
+        changed++;
+        out(install
+            ? `claude-auto: added "${target.line}" to ${target.file} (${target.shell})`
+            : `claude-auto: removed the alias from ${target.file} (${target.shell})`);
+        out(`  Open a new shell, or run: ${target.reload}`);
+    }
+
+    // A profile that PowerShell refuses to execute is loaded by nobody, so the
+    // alias we just wrote would silently never appear.
+    if (install && changed > 0 && os.platform() === 'win32') warnIfProfilesBlocked();
+    return 0;
+}
+
+function warnIfProfilesBlocked(): void {
+    try {
+        const policy: string = execFileSync('powershell', ['-NoProfile', '-Command', 'Get-ExecutionPolicy'], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (/^(Restricted|AllSigned)$/i.test(policy)) {
+            process.stdout.write(
+                `\nHeads up: your PowerShell execution policy is ${policy}, so profile scripts don't run\n` +
+                '  and the alias will never load. Allow local scripts with:\n' +
+                '    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned\n'
+            );
+        }
+    } catch {
+        /* couldn't ask — not worth failing the install over */
+    }
+}
+
+if (process.argv.includes(ALIAS_INSTALL_FLAG) || process.argv.includes(ALIAS_UNINSTALL_FLAG)) {
+    process.exit(runAliasCommand(process.argv.includes(ALIAS_INSTALL_FLAG)));
+}
+
+// ==========================================
 // SELF-CALL GUARD
 // ==========================================
 // A shell alias (`alias claude=claude-auto`) can't reach us: aliases are never
@@ -279,13 +498,10 @@ function printUpdateNotice(): void {
 const ACTIVE_ENV: string = 'CLAUDE_AUTO_ACTIVE';
 
 if (process.env[ACTIVE_ENV] === '1') {
-    const aliasHint: string = os.platform() === 'win32'
-        ? 'Set-Alias claude claude-auto   (PowerShell $PROFILE)  or  doskey claude=claude-auto $*   (cmd)'
-        : 'alias claude=claude-auto';
     // Safe to write here: the pty doesn't exist yet, so there's no TUI to corrupt.
     process.stderr.write(
         'claude-auto: refusing to wrap itself — "claude" on your PATH points back at claude-auto.\n' +
-        `  Alias it instead of installing it under the name "claude": ${aliasHint}\n`
+        `  Alias it instead of installing it under the name "claude": claude-auto ${ALIAS_INSTALL_FLAG}\n`
     );
     process.exit(1);
 }
