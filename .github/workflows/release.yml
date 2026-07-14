@@ -67,10 +67,13 @@ jobs:
       # registry's quirks more predictably. registry-url wires NODE_AUTH_TOKEN in.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - run: bun install --frozen-lockfile
+      # --ignore-scripts skips node-pty's node-gyp rebuild. We publish plain JS;
+      # the native binary is compiled on the user's machine at install time, so
+      # building it here is wasted work that only adds a way for the job to fail.
+      - run: bun install --frozen-lockfile --ignore-scripts
 
       - run: bun run typecheck
 

@@ -147,6 +147,127 @@ function log(msg: string): void {
 }
 
 // ==========================================
+// UPDATE NOTICE
+// ==========================================
+// A global npm install never updates itself, so a user can sit on an old build
+// indefinitely. That matters more here than for most tools: limit detection
+// keys off Claude Code's rendered wording, so when that wording changes, an
+// outdated copy stops resuming *silently* — it looks like claude-auto is broken
+// rather than stale. So we tell them a newer version exists.
+//
+// Two constraints shape this, and neither is negotiable:
+//   1. Claude owns the terminal while it runs. Writing anything to stdout mid-
+//      session corrupts its render, so the notice is printed only from cleanup(),
+//      once the pty is gone and the screen is ours again. It goes to stderr so
+//      that `claude-auto -p '...' > out.txt` keeps a clean stdout.
+//   2. A session must never wait on the network. So we never fetch-then-print:
+//      we print from a cache a *previous* run wrote, and refresh that cache in
+//      the background. First run shows nothing; every run after is instant.
+const PACKAGE_NAME: string = '@hotox/claude-auto';
+const REGISTRY_URL: string = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const UPDATE_CACHE_FILE: string = path.join(os.homedir(), '.claude-auto', 'update-check.json');
+
+// How stale the cache may get before we refresh it. The notice is a nudge, not
+// news — checking once a day is plenty and keeps us off the registry.
+const UPDATE_CHECK_INTERVAL_MS: number = 24 * 60 * 60 * 1000;
+
+// The refresh is fire-and-forget, but an abandoned socket would still hold the
+// event loop open at exit, so it gets a hard deadline.
+const UPDATE_FETCH_TIMEOUT_MS: number = 3000;
+
+// Opt-out for anyone who doesn't want the check (or is offline/air-gapped).
+const UPDATE_OPT_OUT_ENV: string = 'CLAUDE_AUTO_NO_UPDATE_CHECK';
+
+interface UpdateCache {
+    checkedAt: number;
+    latest: string;
+}
+
+const requireFrom = createRequire(import.meta.url);
+
+// package.json sits next to the source in dev but one level up from dist/ once
+// installed. Rather than guess the layout, try both and take whichever is
+// actually ours — checking the name means a stray package.json can't fool us.
+function readOwnVersion(): string {
+    for (const rel of ['./package.json', '../package.json']) {
+        try {
+            const pkg = requireFrom(rel) as { name?: string; version?: string };
+            if (pkg.name === PACKAGE_NAME && pkg.version) return pkg.version;
+        } catch {
+            /* not there — try the next candidate */
+        }
+    }
+    return '0.0.0'; // unknown version: compares older than everything, so we stay quiet
+}
+
+const VERSION: string = readOwnVersion();
+
+// True when `latest` is strictly ahead of `current`. Compares major/minor/patch
+// numerically and ignores any prerelease suffix: we only ever read the `latest`
+// dist-tag, so a prerelease can't show up here unless someone tags one as latest.
+function isNewer(latest: string, current: string): boolean {
+    const parts = (v: string): number[] =>
+        v.split('-')[0]!.split('.').map(n => parseInt(n, 10) || 0);
+    const [a, b] = [parts(latest), parts(current)];
+    for (let i = 0; i < 3; i++) {
+        const [x, y] = [a[i] ?? 0, b[i] ?? 0];
+        if (x !== y) return x > y;
+    }
+    return false;
+}
+
+function readUpdateCache(): UpdateCache | null {
+    try {
+        return JSON.parse(fs.readFileSync(UPDATE_CACHE_FILE, 'utf8')) as UpdateCache;
+    } catch {
+        return null; // absent or corrupt — treated the same: nothing to say yet
+    }
+}
+
+// Refresh the cache for the *next* run. Deliberately not awaited: nothing in
+// this process depends on the result, and unref'ing the timeout means a slow
+// registry can never hold the exit open.
+function refreshUpdateCache(): void {
+    const cache = readUpdateCache();
+    if (cache && Date.now() - cache.checkedAt < UPDATE_CHECK_INTERVAL_MS) return;
+
+    void (async (): Promise<void> => {
+        try {
+            const res = await fetch(REGISTRY_URL, {
+                signal: AbortSignal.timeout(UPDATE_FETCH_TIMEOUT_MS),
+                headers: { accept: 'application/vnd.npm.install-v1+json' }
+            });
+            if (!res.ok) return;
+            const { version } = await res.json() as { version?: string };
+            if (!version) return;
+
+            const next: UpdateCache = { checkedAt: Date.now(), latest: version };
+            fs.mkdirSync(path.dirname(UPDATE_CACHE_FILE), { recursive: true });
+            fs.writeFileSync(UPDATE_CACHE_FILE, JSON.stringify(next));
+            log(`update check: latest=${version} current=${VERSION}`);
+        } catch {
+            /* offline, rate-limited, registry down — a nudge isn't worth a warning */
+        }
+    })();
+}
+
+// Called from cleanup(), i.e. only once the pty is dead. Reads the cache the
+// previous run left behind; never touches the network.
+function printUpdateNotice(): void {
+    if (process.env[UPDATE_OPT_OUT_ENV] === '1') return;
+    // Not a terminal? Then stderr is a log or a pipe, and this is just noise.
+    if (!process.stderr.isTTY) return;
+
+    const cache = readUpdateCache();
+    if (!cache?.latest || !isNewer(cache.latest, VERSION)) return;
+
+    process.stderr.write(
+        `\nclaude-auto ${VERSION} → ${cache.latest} — update with:\n` +
+        `  npm install -g ${PACKAGE_NAME}@latest\n`
+    );
+}
+
+// ==========================================
 // SELF-CALL GUARD
 // ==========================================
 // A shell alias (`alias claude=claude-auto`) can't reach us: aliases are never
@@ -191,6 +312,10 @@ const ptyProcess = pty.spawn(shell, args, {
     // fidelity than the older in-box Windows ConPTY.
     useConptyDll: true
 });
+
+// Claude is already starting; this rides along in the background and only
+// affects what the *next* run prints.
+refreshUpdateCache();
 
 // @xterm/headless ships a CJS bundle whose named exports Node's ESM loader can't
 // statically detect, so we pull Terminal in via require() (this project runs
@@ -357,6 +482,8 @@ function cleanup(): void {
     }
     restoreTitle();
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch { /* terminal already gone */ }
+    // Last thing we do: the pty is gone, so the screen is finally safe to write to.
+    printUpdateNotice();
 }
 
 process.on('exit', cleanup);

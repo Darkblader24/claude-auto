@@ -28,19 +28,46 @@ the moment your quota is back. No babysitting, no lost context.
 ## Install
 
 ```bash
-npm install -g claude-auto
+npm install -g @hotox/claude-auto
 ```
 
 <details>
 <summary>More package managers</summary>
 
 ```bash
-bun add -g claude-auto
-pnpm add -g claude-auto
-yarn global add claude-auto
+bun add -g @hotox/claude-auto
+pnpm add -g @hotox/claude-auto
+yarn global add @hotox/claude-auto
 ```
 
 </details>
+
+Or run it without installing anything — handy for trying it once:
+
+```bash
+npx @hotox/claude-auto      # or: bunx @hotox/claude-auto
+```
+
+Note that `npx`/`bunx` re-resolve the package on each run, so they're slower to
+start than a global install (and they can't be aliased to `claude`).
+
+### Updating
+
+npm never updates a global install on its own, so you stay on the version you
+installed until you say otherwise:
+
+```bash
+npm install -g @hotox/claude-auto@latest
+```
+
+`claude-auto` checks for a new version once a day in the background and, if one
+exists, prints a one-line reminder **after Claude exits** — never during a
+session, where it would corrupt the TUI. Set `CLAUDE_AUTO_NO_UPDATE_CHECK=1` to
+turn the check off entirely.
+
+Keeping current matters more here than for most tools: limit detection reads
+Claude Code's on-screen wording, so if that wording changes, an outdated copy
+quietly stops auto-resuming.
 
 ## Usage
 
@@ -111,6 +138,13 @@ never collide with a real `claude` flag, and it's stripped before forwarding.
 |:---------------|:------------------------------------------------------------------------------|
 | `--auto-debug` | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
 
+### Environment variables
+
+| Variable                      | Effect                                                           |
+|:------------------------------|:-----------------------------------------------------------------|
+| `CLAUDE_AUTO_PERMISSION_MODE` | Start every session in this permission mode                      |
+| `CLAUDE_AUTO_NO_UPDATE_CHECK` | Set to `1` to disable the daily update check and the exit notice |
+
 ## How auto-resume works
 
 Every 2 seconds, `claude-auto` snapshots the **rendered screen**, the grid of
@@ -169,32 +203,24 @@ On Windows, `claude-auto.cmd` runs the local source without installing anything.
 
 ## Publishing
 
+The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/package/@hotox/claude-auto).
+
 Releases are cut by [`.github/workflows/release.yml`](.github/workflows/release.yml)
 on every push to `main`, but **only when `version` in `package.json` changes**,
-an ordinary push is a no-op. Publishing is currently disabled by
-`"private": true`.
-
-To arm it:
-
-1. **Pick the npm name.** It lives in exactly one place: the `name` field of
-   `package.json`. Nothing else depends on it, not the workflow, not the binary
-   name, nothing but this file. A scoped name (`@scope/claude-auto`) works
-   unchanged; the workflow already passes `--access public`.
-2. **Remove `"private": true`** from `package.json`.
-3. **Add an npm automation token** as a repo secret: `gh secret set NPM_TOKEN`.
-4. **Bump `version`** and push to `main`.
-
+an ordinary push is a no-op. To cut a release, bump `version` and push to `main`.
 The workflow type-checks, builds, publishes to npm, tags `v<version>`, and creates
 a GitHub Release with generated notes.
 
-Notes for whoever picks the name:
+It needs an npm automation token in the repo secret `NPM_TOKEN` (`gh secret set NPM_TOKEN`).
+
+Notes:
 
 - The installed binary is always `claude-auto`, independent of the package name.
 - npm cannot rename a published package. If you outgrow the name, publish under
   the new one and `npm deprecate <old> "moved to <new>"`.
 - The unscoped name `claude-auto` was published and unpublished by someone on
-  2026-04-26. npm blocks reuse of unpublished names, so publishing under it will
-  fail with a 403 unless you were the original owner.
+  2026-04-26. npm blocks reuse of unpublished names, which is why the package is
+  scoped.
 - [Provenance](https://docs.npmjs.com/generating-provenance-statements) is off
   because it requires a public repo. If you make this repo public, add
   `--provenance` to the publish step and `id-token: write` to the job's
