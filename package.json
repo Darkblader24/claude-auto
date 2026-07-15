@@ -1,6 +1,6 @@
 {
   "name": "@hotox/claude-auto",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Auto-continue for Claude Code. Waits out your usage limit and resumes the session automatically",
   "publishConfig": {
     "access": "public"

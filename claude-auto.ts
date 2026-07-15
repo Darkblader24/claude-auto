@@ -122,10 +122,21 @@ const USAGE_RETRY_COOLDOWN_MS: number = 5 * 60 * 1000;
 // Safety margin added on top of the /usage reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
 
-// A reset we've already counted down to is ignored if it shows up again within
-// this window (a stale banner re-appearing after we resume). After it, the same
-// clock time is a genuinely new day's limit and is allowed to trigger again.
-const REPEAT_LIMIT_WINDOW_MS: number = 19 * 60 * 60 * 1000;
+// The text sent to continue a session
+const RESUME_CONTINUE_TEXT: string = 'continue';
+
+// On resume we submit "continue", which Claude echoes into the transcript just
+// below the limit banner we waited out. So a banner with our continue beneath it
+// is one we've already resumed past — stale scrollback — and detection skips it.
+// This is what stops the just-waited-out limit re-triggering, with no time window
+// to tune: a genuinely new limit renders below the last continue, so its banner
+// has nothing after it and is still verified.
+//
+// The string must match how Claude renders our submitted message. If that ever
+// changes, a stale banner would be re-detected — one /usage check, then quiet for
+// DISPROVED_LIMIT_WINDOW_MS — a safe failure, but confirm it against an
+// --auto-debug screen capture (logScreen writes exactly what we match here).
+const RESUME_CONTINUE_MARKER: string = '❯ ' + RESUME_CONTINUE_TEXT;
 
 // Ctrl-U clears the input line in Claude Code; the draft can wrap, so we fire it
 // a few times to wipe the whole composer before typing our own command.
@@ -567,8 +578,6 @@ let isWaiting: boolean = false;     // a confirmed limit countdown is running
 let isVerifying: boolean = false;   // /usage panel is open for verification
 let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
 let countdownInterval: NodeJS.Timeout | null = null;
-let lastResetMinutes: number | null = null; // banner reset (minutes-of-day) of last countdown
-let lastFoundAt: number = 0;                 // wall-clock time we started that countdown
 let disprovedResetMinutes: number | null = null; // banner reset /usage said wasn't a limit
 let disprovedAt: number = 0;                     // wall-clock time /usage disproved it
 let usageRetryUntil: number = 0;             // no /usage re-read before this (read failed)
@@ -874,6 +883,18 @@ function resetMinutes(match: RegExpMatchArray): number {
     return hours * 60 + minutes;
 }
 
+// The newest limit banner on screen (the last regex match) and where it starts,
+// or null if there's none. We take the last one because a premature reset can
+// leave the old banner and a fresh one on screen at once, and it's the newest
+// that says whether we're still limited.
+function lastLimitBanner(screen: string): { index: number; match: RegExpMatchArray } | null {
+    const re: RegExp = new RegExp(limitRegex.source, 'gi');
+    let last: RegExpExecArray | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(screen)) !== null) last = m;
+    return last === null ? null : { index: last.index, match: last };
+}
+
 // True while Claude's resume-from-summary question is on screen. Answering it is
 // the user's call, so we send nothing — not /usage, not the resume.
 function hasResumePrompt(screen: string): boolean {
@@ -908,20 +929,20 @@ function detectLimit(screen: string): void {
         return;
     }
 
-    const match = screen.match(limitRegex);
-    if (!match) return;
+    // Newest limit banner on screen. If the "continue" we sent on resume sits
+    // below it, we've already resumed past this banner — it's stale scrollback,
+    // so ignore it (see RESUME_CONTINUE_MARKER). A genuinely still-live limit
+    // renders below that continue, so its banner has nothing after it and falls
+    // through to /usage.
+    const banner = lastLimitBanner(screen);
+    if (banner === null) return;
 
-    const bannerMinutes = resetMinutes(match);
-
-    // Skip a reset we've already counted down to (a stale banner re-appearing
-    // after we resumed), unless the repeat window has passed — by then the same
-    // clock time is a new day's limit.
-    if (lastResetMinutes !== null &&
-        bannerMinutes === lastResetMinutes &&
-        Date.now() - lastFoundAt < REPEAT_LIMIT_WINDOW_MS) {
-        log('Same reset as last countdown — ignoring');
+    if (screen.slice(banner.index).includes(RESUME_CONTINUE_MARKER)) {
+        log('Limit banner sits above a resumed "continue" — ignoring as stale');
         return;
     }
+
+    const bannerMinutes = resetMinutes(banner.match);
 
     // This exact banner was already checked against /usage and disproved. Opening
     // the panel again would only find the same answer, so leave it alone until a
@@ -970,7 +991,7 @@ async function verifyViaUsage(bannerMinutes: number): Promise<void> {
         log('Session below 100% — banner is stale, ignoring this reset from now on');
         return;
     }
-    startCountdown(usage.resetMinutesOfDay, bannerMinutes);
+    startCountdown(usage.resetMinutesOfDay);
 }
 
 // Open the /usage panel and read the "Current session" block. When the window
@@ -1051,19 +1072,13 @@ async function readSessionUsage(): Promise<SessionUsage | null> {
     return { percentUsed, resetMinutesOfDay };
 }
 
-// The countdown target comes from /usage; the banner's own reset time is kept
-// separately because the *banner* is what re-appears on screen — the repeat
-// guard in detectLimit compares against it.
-function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void {
+// The countdown target comes from /usage — the authoritative reset time. From
+// here until we resume, detection is paused (isWaiting), so nothing re-enters.
+function startCountdown(targetMinutesOfDay: number): void {
     isWaiting = true;
 
-    // Remember this reset (and when we found it) so the same banner re-appearing
-    // after we resume doesn't trigger a second countdown (see detectLimit).
-    lastResetMinutes = bannerMinutes;
-    lastFoundAt = Date.now();
-
-    // A real limit ends the disproof: whatever banner we'd written off belongs to
-    // a session that's over, so the next one gets verified again.
+    // A real limit ends any prior disproof: whatever banner we'd written off
+    // belongs to a session that's over, so the next one gets verified again.
     disprovedResetMinutes = null;
     disprovedAt = 0;
     usageRetryUntil = 0;
@@ -1086,35 +1101,41 @@ function startCountdown(targetMinutesOfDay: number, bannerMinutes: number): void
     countdownInterval = setInterval(() => {
         const remainingMs = targetTimeMs - Date.now();
 
-        if (remainingMs <= 0) {
-            // Quota is back, but the resume-from-summary question is up: our Enter
-            // would answer it. Hold the countdown open and try again next tick, so
-            // the session resumes the moment the user has answered.
-            if (hasResumePrompt(captureScreen())) {
-                log('Timer elapsed but resume-from-summary question is up — holding');
-                setTitle('⏳ Claude Resumes: waiting for your answer');
-                return;
-            }
-            clearInterval(countdownInterval!);
-            countdownInterval = null;
-            isWaiting = false;
-            // Hand the title back to Claude and resume the session.
-            restoreTitle();
-            log('Timer elapsed — sending "continue" to resume');
-            ptyProcess.write(CLEAR_INPUT_SEQUENCE + 'continue\r');
-        } else {
+        if (remainingMs > 0) {
             const totalSeconds = Math.floor(remainingMs / 1000);
             const h = Math.floor(totalSeconds / 3600);
             const m = Math.floor((totalSeconds % 3600) / 60);
             const s = totalSeconds % 60;
             const timeStr = `${h > 0 ? h + 'h ' : ''}${m}m ${s}s`;
             setTitle(`⏳ Claude Resumes: ${timeStr}`);
+            return;
         }
+
+        // Quota should be back, but the resume-from-summary question is up: our
+        // Enter would answer it. Hold the countdown open and try again next tick,
+        // so the session resumes the moment the user has answered.
+        if (hasResumePrompt(captureScreen())) {
+            log('Timer elapsed but resume-from-summary question is up — holding');
+            setTitle('⏳ Claude Resumes: waiting for your answer');
+            return;
+        }
+
+        clearInterval(countdownInterval!);
+        countdownInterval = null;
+        isWaiting = false;
+        // Hand the title back to Claude and resume the session.
+        restoreTitle();
+        // "continue" lands in the transcript just below the banner we waited out,
+        // which is what stops detectLimit re-reading that stale banner (see
+        // RESUME_CONTINUE_MARKER). If the reset was early and the limit is still
+        // live, the next banner renders below this continue and is verified.
+        log('Timer elapsed — sending "continue" to resume');
+        ptyProcess.write(CLEAR_INPUT_SEQUENCE + RESUME_CONTINUE_TEXT + '\r');
     }, 1000);
 }
 
-// Cancel an in-progress countdown (triggered by F4). Clears the remembered reset
-// and the time we found it, so the very same limit can be detected again.
+// Cancel an in-progress countdown (triggered by F4). Clears the disproof and
+// backoff state so the very same limit can be detected again immediately.
 function cancelCountdown(): void {
     if (countdownInterval) {
         clearInterval(countdownInterval);
@@ -1122,11 +1143,9 @@ function cancelCountdown(): void {
     }
     restoreTitle();
     isWaiting = false;
-    lastResetMinutes = null;
-    lastFoundAt = 0;
     disprovedResetMinutes = null;
     disprovedAt = 0;
     usageRetryUntil = 0;
-    log('Countdown cancelled (F4) — reset cleared, detection re-armed');
+    log('Countdown cancelled (F4) — detection re-armed');
 }
 
