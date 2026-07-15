@@ -286,6 +286,15 @@ const ALIAS_UNINSTALL_FLAG: string = '--uninstall-alias';
 const ALIAS_BEGIN: string = '# >>> claude-auto alias >>>';
 const ALIAS_END: string = '# <<< claude-auto alias <<<';
 
+// Colour the final verdict so it can't be missed in a wall of per-file output.
+// NO_COLOR / a non-TTY stdout means the codes would just be noise, so drop them.
+function colorize(code: string, msg: string): string {
+    const on: boolean = process.stdout.isTTY === true && !process.env.NO_COLOR;
+    return on ? `\x1b[${code}m${msg}\x1b[0m` : msg;
+}
+const green = (msg: string): string => colorize('32', msg);
+const red = (msg: string): string => colorize('31', msg);
+
 interface AliasTarget {
     shell: string;  // what to call it when we report back
     file: string;   // the startup file to edit
@@ -412,6 +421,7 @@ function runAliasCommand(install: boolean): number {
             '  cmd.exe has no startup file: a permanent doskey macro needs the\n' +
             '  Command Processor AutoRun registry key. Use PowerShell instead.'
         );
+        out(red(`claude-auto: alias ${install ? 'install' : 'uninstall'} failed.`));
         return 1;
     }
 
@@ -450,6 +460,7 @@ function runAliasCommand(install: boolean): number {
             writeAliasFile(target.file, after);
         } catch (err) {
             out(`claude-auto: couldn't write ${target.file} — ${String(err)}`);
+            out(red(`claude-auto: alias ${install ? 'install' : 'uninstall'} failed.`));
             return 1;
         }
         changed++;
@@ -462,6 +473,10 @@ function runAliasCommand(install: boolean): number {
     // A profile that PowerShell refuses to execute is loaded by nobody, so the
     // alias we just wrote would silently never appear.
     if (install && changed > 0 && os.platform() === 'win32') warnIfProfilesBlocked();
+    out(green(
+        `claude-auto: alias ${install ? 'install' : 'uninstall'} successful — ` +
+        'restart your terminal for it to take effect.'
+    ));
     return 0;
 }
 

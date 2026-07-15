@@ -27,6 +27,7 @@ The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/
 ---
 </div>
 
+
 ## Install
 
 ```bash
@@ -51,7 +52,9 @@ npx @hotox/claude-auto      # or: bunx @hotox/claude-auto
 ```
 
 Note that `npx`/`bunx` re-resolve the package on each run, so they're slower to
-start than a global install (and they can't be aliased to `claude`).
+start than a global installation, and they can't be aliased to `claude`, but it uses the
+latest version of `claude-auto` on every run.
+
 
 ### Updating
 
@@ -67,9 +70,6 @@ exists, prints a one-line reminder **after Claude exits** — never during a
 session, where it would corrupt the TUI. Set `CLAUDE_AUTO_NO_UPDATE_CHECK=1` to
 turn the check off entirely.
 
-Keeping current matters more here than for most tools: limit detection reads
-Claude Code's on-screen wording, so if that wording changes, an outdated copy
-quietly stops auto-resuming.
 
 ## Usage
 
@@ -83,14 +83,14 @@ claude-auto --permission-mode plan  # same as `claude --permission-mode plan`
 
 ### Aliasing it to `claude`
 
-Make `claude` mean `claude-auto`, permanently:
+To make `claude` always start `claude-auto` automatically:
 
 ```bash
 claude-auto --install-alias     # --uninstall-alias to undo it
 ```
 
 It writes the alias into your shell's startup file (`~/.zshrc`, `~/.bashrc`,
-`config.fish`, PowerShell's `$PROFILE` — it picks the right one and tells you
+`config.fish`, PowerShell's `$PROFILE`. it picks the right one and tells you
 which), so every new shell has it. Safe to re-run. Open a new shell afterwards.
 
 Not supported for `cmd.exe`: `doskey` has no startup file, so a permanent macro
@@ -137,12 +137,12 @@ picked up again.
 `claude-auto` owns these flags. None of them reach `claude`; everything else you
 pass goes to it verbatim.
 
-| Flag                | Effect                                                                        |
-|:--------------------|:------------------------------------------------------------------------------|
-| `--no-auto-mode`    | Don't pass `--permission-mode auto` — start in claude's own default mode      |
-| `--auto-debug`      | Append rendered-screen snapshots and detection decisions to `claude-auto.log` |
-| `--install-alias`   | Write `claude` → `claude-auto` into your shell's startup file, then exit      |
-| `--uninstall-alias` | Remove that alias again, then exit                                            |
+| Flag                | Effect                                                                           |
+|:--------------------|:---------------------------------------------------------------------------------|
+| `--no-auto-mode`    | Don't pass `--permission-mode auto`. Makes it start in claude's own default mode |
+| `--install-alias`   | Write `claude` → `claude-auto` into your shell's startup file                    |
+| `--uninstall-alias` | Remove that alias again                                                          |
+| `--auto-debug`      | Append rendered-screen snapshots and detection decisions to `claude-auto.log`    |
 
 The first two are stripped before forwarding and the session runs as usual. The
 alias flags don't start a session at all: they edit the file, report what they
