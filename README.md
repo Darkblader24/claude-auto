@@ -1,11 +1,11 @@
 <div align="center">
 
-# claude-auto
+# claude-auto: auto-continue for Claude Code
 ![⏳ Claude Resumes: 2h 14m 08s](https://i.imgur.com/2braByb.gif)
 
 **Hit your session limit? Go do something else.**
 <br>
-`claude-auto` automatically waits out the reset and picks up right where you left off.
+`claude-auto` automatically waits out the reset and continues right where you left off.
 
 
 [![npm](https://img.shields.io/npm/v/@hotox/claude-auto.svg)](https://www.npmjs.com/package/@hotox/claude-auto)
