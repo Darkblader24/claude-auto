@@ -474,8 +474,8 @@ function runAliasCommand(install: boolean): number {
     // alias we just wrote would silently never appear.
     if (install && changed > 0 && os.platform() === 'win32') warnIfProfilesBlocked();
     out(green(
-        `claude-auto: alias ${install ? 'install' : 'uninstall'} successful — ` +
-        'restart your terminal for it to take effect.'
+        `claude-auto: alias ${install ? 'install' : 'uninstall'} successful! ` +
+        'Restart your terminal for it to take effect.'
     ));
     return 0;
 }
@@ -641,6 +641,53 @@ function restoreTitle(): void {
 }
 
 // ==========================================
+// FIRST-RUN TRUST DIALOG
+// ==========================================
+// Claude's first-run "trust this folder?" prompt is drawn on the MAIN screen,
+// before Claude switches to the alternate screen for its TUI. Normally the alt
+// screen restores the main buffer on exit — that's how the shell prompt comes
+// back exactly where it was — but here the main buffer still holds the trust
+// dialog, and the cursor is restored into the middle of it, so the returning
+// prompt prints across the leftover lines instead of on a clean screen.
+//
+// We can't stop Claude drawing the dialog, but if we saw it go by we know the
+// restored main screen is dirty, so cleanup() clears it rather than handing back
+// a wall of stale onboarding text. We only scan up to the first alternate-screen
+// switch: the dialog is always drawn before it, and after it any "trust this
+// folder" wording is just chat content on the alt buffer, which never leaks out.
+const ONBOARDING_MARKERS: readonly string[] = ['trust this folder', 'Quick safety check'];
+const ALT_SCREEN_ENTER: string = '\x1b[?1049h';
+// Longer than any marker, so a marker split across two pty chunks is still whole
+// once the previous chunk's tail is prepended.
+const ONBOARDING_CARRY_MAX: number = 64;
+// Home, clear screen, clear scrollback — sent on exit only when the dialog was
+// seen, to wipe the leftover the alt-screen restore would otherwise bring back.
+const ONBOARDING_CLEAR: string = '\x1b[H\x1b[2J\x1b[3J';
+
+let onboardingSeen: boolean = false;   // the trust dialog was drawn this session
+let altScreenEntered: boolean = false; // scanning stops once the TUI takes over
+let onboardingCarry: string = '';      // partial marker carried between chunks
+
+function trackOnboarding(data: string): void {
+    if (altScreenEntered || onboardingSeen) return;
+    const haystack: string = onboardingCarry + data;
+    if (ONBOARDING_MARKERS.some(marker => haystack.includes(marker))) {
+        onboardingSeen = true;
+        onboardingCarry = '';
+        log('First-run trust dialog seen — main screen will be cleared on exit');
+        return;
+    }
+    // Once the alt screen is entered the dialog is behind us; stop scanning so
+    // later chat that mentions trusting a folder can't trip the exit clear.
+    if (haystack.includes(ALT_SCREEN_ENTER)) {
+        altScreenEntered = true;
+        onboardingCarry = '';
+        return;
+    }
+    onboardingCarry = haystack.slice(-ONBOARDING_CARRY_MAX);
+}
+
+// ==========================================
 // I/O WIRING
 // ==========================================
 process.stdout.on('resize', () => {
@@ -676,6 +723,7 @@ ptyProcess.onData((data: string) => {
     process.stdout.write(data);
     term.write(data);
     trackTitle(data);
+    trackOnboarding(data);
 });
 
 // ==========================================
@@ -746,7 +794,11 @@ function cleanup(): void {
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch { /* terminal already gone */ }
     process.stdin.pause();
     // From here on the pty is gone, so the screen is finally ours to write to.
-    try { process.stdout.write(TERMINAL_RESET); } catch { /* terminal already gone */ }
+    // If the first-run trust dialog was shown, the alt-screen restore has just
+    // brought its stale lines back onto the main screen; clear them so the shell
+    // prompt returns to a clean screen instead of mid-dialog.
+    const resetSeq: string = onboardingSeen ? TERMINAL_RESET + ONBOARDING_CLEAR : TERMINAL_RESET;
+    try { process.stdout.write(resetSeq); } catch { /* terminal already gone */ }
     printUpdateNotice();
 }
 

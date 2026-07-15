@@ -1,2 +1,2 @@
 @echo off
-bunx tsx "%~dp0claude-auto.ts" %*
+node "%~dp0node_modules\tsx\dist\cli.mjs" "%~dp0claude-auto.ts" %*
