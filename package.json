@@ -1,6 +1,6 @@
 {
   "name": "@hotox/claude-auto",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A node-pty wrapper around the claude CLI that auto-resumes the session when you hit a usage limit.",
   "publishConfig": {
     "access": "public"
