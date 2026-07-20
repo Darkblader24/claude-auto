@@ -52,6 +52,15 @@ const forwardedArgs: string[] = [...cliArgs, ...permissionModeArgs(cliArgs)];
 // trip it. Time is lenient: optional minutes, optional space, any case am/pm.
 const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
 
+// A transient upstream failure, rendered into the transcript as "● API Error: 529"
+// (overloaded). Nothing about it is quota, so there's nothing /usage could
+// confirm — it clears on its own. All we do is wait a short while and retry.
+// Whitespace is loose because the line can be re-wrapped at narrow widths.
+const apiErrorRegex: RegExp = /●\s*API Error:\s*529/i;
+
+// How long to sit out a 529 before sending "continue" again.
+const API_ERROR_COOLDOWN_MS: number = 5 * 60 * 1000;
+
 // Claude sometimes offers a "Stop and wait for limit to reset" menu; we select it
 // (press Enter) so the session parks until reset. Wait briefly so the menu has
 // fully rendered, then ignore it for a grace period so the redraw doesn't make
@@ -883,16 +892,24 @@ function resetMinutes(match: RegExpMatchArray): number {
     return hours * 60 + minutes;
 }
 
-// The newest limit banner on screen (the last regex match) and where it starts,
-// or null if there's none. We take the last one because a premature reset can
-// leave the old banner and a fresh one on screen at once, and it's the newest
-// that says whether we're still limited.
-function lastLimitBanner(screen: string): { index: number; match: RegExpMatchArray } | null {
-    const re: RegExp = new RegExp(limitRegex.source, 'gi');
+// The newest match of `pattern` on screen and where it starts, or null if
+// there's none. We take the last one because a premature reset can leave the old
+// banner and a fresh one on screen at once, and it's the newest that says
+// whether we're still limited — the same holds for repeated API errors.
+function lastMatch(screen: string, pattern: RegExp): { index: number; match: RegExpMatchArray } | null {
+    const re: RegExp = new RegExp(pattern.source, 'gi');
     let last: RegExpExecArray | null = null;
     let m: RegExpExecArray | null;
     while ((m = re.exec(screen)) !== null) last = m;
     return last === null ? null : { index: last.index, match: last };
+}
+
+// True when the "continue" we send on resume sits below `index` — i.e. we've
+// already resumed past whatever we matched there, so it's stale scrollback.
+// See RESUME_CONTINUE_MARKER: a genuinely live banner or error renders below
+// the last continue, so nothing follows it and it still gets handled.
+function alreadyResumedPast(screen: string, index: number): boolean {
+    return screen.slice(index).includes(RESUME_CONTINUE_MARKER);
 }
 
 // True while Claude's resume-from-summary question is on screen. Answering it is
@@ -929,17 +946,25 @@ function detectLimit(screen: string): void {
         return;
     }
 
+    // A session limit outranks a 529: if we're out of quota, retrying in five
+    // minutes would just hit the limit again.
+    if (handleLimitBanner(screen)) return;
+    handleApiError(screen);
+}
+
+// Returns true when a live limit banner was found and verification started, so
+// the caller knows the screen is spoken for.
+function handleLimitBanner(screen: string): boolean {
     // Newest limit banner on screen. If the "continue" we sent on resume sits
     // below it, we've already resumed past this banner — it's stale scrollback,
-    // so ignore it (see RESUME_CONTINUE_MARKER). A genuinely still-live limit
-    // renders below that continue, so its banner has nothing after it and falls
-    // through to /usage.
-    const banner = lastLimitBanner(screen);
-    if (banner === null) return;
+    // so ignore it. A genuinely still-live limit renders below that continue, so
+    // its banner has nothing after it and falls through to /usage.
+    const banner = lastMatch(screen, limitRegex);
+    if (banner === null) return false;
 
-    if (screen.slice(banner.index).includes(RESUME_CONTINUE_MARKER)) {
+    if (alreadyResumedPast(screen, banner.index)) {
         log('Limit banner sits above a resumed "continue" — ignoring as stale');
-        return;
+        return false;
     }
 
     const bannerMinutes = resetMinutes(banner.match);
@@ -951,13 +976,13 @@ function detectLimit(screen: string): void {
         bannerMinutes === disprovedResetMinutes &&
         Date.now() - disprovedAt < DISPROVED_LIMIT_WINDOW_MS) {
         log('Same reset /usage already disproved — ignoring');
-        return;
+        return false;
     }
 
     // A previous /usage read failed; back off before opening the panel again.
     if (Date.now() < usageRetryUntil) {
         log('Limit text on screen but inside /usage retry backoff — ignoring');
-        return;
+        return false;
     }
 
     // Candidate limit on the live screen. Confirm it against /usage: the banner
@@ -967,6 +992,24 @@ function detectLimit(screen: string): void {
     verifyViaUsage(bannerMinutes)
         .catch(err => log(`/usage verification error: ${err}`))
         .finally(() => { isVerifying = false; });
+    return true;
+}
+
+// A 529 is transient, so there is no panel to confirm it against — the screen is
+// the whole evidence. It goes through the same guards as a limit banner
+// (scrolled-up history, the resume question, the wait-for-reset menu, and the
+// resumed-"continue" staleness test), then just waits it out.
+function handleApiError(screen: string): void {
+    const error = lastMatch(screen, apiErrorRegex);
+    if (error === null) return;
+
+    if (alreadyResumedPast(screen, error.index)) {
+        log('API error sits above a resumed "continue" — ignoring as stale');
+        return;
+    }
+
+    log(`API error 529 on screen — retrying in ${API_ERROR_COOLDOWN_MS / 60000} min`);
+    startCountdown(Date.now() + API_ERROR_COOLDOWN_MS);
 }
 
 // ==========================================
@@ -991,7 +1034,29 @@ async function verifyViaUsage(bannerMinutes: number): Promise<void> {
         log('Session below 100% — banner is stale, ignoring this reset from now on');
         return;
     }
-    startCountdown(usage.resetMinutesOfDay);
+
+    // A real limit ends any prior disproof: whatever banner we'd written off
+    // belongs to a session that's over, so the next one gets verified again.
+    disprovedResetMinutes = null;
+    disprovedAt = 0;
+    usageRetryUntil = 0;
+
+    startCountdown(resumeTimeFrom(usage.resetMinutesOfDay));
+}
+
+// The absolute time to resume at, from a reset clock time in minutes-of-day:
+// today's occurrence plus the safety margin, or tomorrow's if that's already past.
+function resumeTimeFrom(targetMinutesOfDay: number): number {
+    const hours = Math.floor(targetMinutesOfDay / 60);
+    const minutes = targetMinutesOfDay % 60;
+
+    const now = new Date();
+    let targetTimeMs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0).getTime();
+    targetTimeMs += WAIT_BUFFER_MS;
+    if (targetTimeMs < Date.now()) {
+        targetTimeMs += 24 * 60 * 60 * 1000;
+    }
+    return targetTimeMs;
 }
 
 // Open the /usage panel and read the "Current session" block. When the window
@@ -1072,31 +1137,16 @@ async function readSessionUsage(): Promise<SessionUsage | null> {
     return { percentUsed, resetMinutesOfDay };
 }
 
-// The countdown target comes from /usage — the authoritative reset time. From
+// Wait until `targetTimeMs`, then send "continue". The target is either the
+// authoritative reset time /usage gave us, or a short cooldown after a 529. From
 // here until we resume, detection is paused (isWaiting), so nothing re-enters.
-function startCountdown(targetMinutesOfDay: number): void {
+function startCountdown(targetTimeMs: number): void {
     isWaiting = true;
-
-    // A real limit ends any prior disproof: whatever banner we'd written off
-    // belongs to a session that's over, so the next one gets verified again.
-    disprovedResetMinutes = null;
-    disprovedAt = 0;
-    usageRetryUntil = 0;
 
     // From here on the title is ours; restoreTitle() hands it back.
     titleOverridden = true;
 
-    const hours = Math.floor(targetMinutesOfDay / 60);
-    const minutes = targetMinutesOfDay % 60;
-
-    const now = new Date();
-    let targetTimeMs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0).getTime();
-    targetTimeMs += WAIT_BUFFER_MS;
-    if (targetTimeMs < Date.now()) {
-        targetTimeMs += 24 * 60 * 60 * 1000;
-    }
-
-    log(`Limit confirmed. Resuming at ${new Date(targetTimeMs).toLocaleString()}`);
+    log(`Resuming at ${new Date(targetTimeMs).toLocaleString()}`);
 
     countdownInterval = setInterval(() => {
         const remainingMs = targetTimeMs - Date.now();

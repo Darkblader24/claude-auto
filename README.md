@@ -177,6 +177,13 @@ When a session-limit banner appears:
    banner — showing the remaining time in your window title, and sends
    `continue` when the clock runs out.
 
+**Overload errors** (`● API Error: 529`) are handled the same way, minus the
+verification: there's no quota involved, so there's nothing `/usage` could
+confirm. `claude-auto` just counts down five minutes and sends `continue`. If the
+error comes back, so does the countdown. A session-limit banner takes precedence
+— when you're out of quota, retrying in five minutes would only hit the limit
+again.
+
 Some more details:
 
 - Detection is skipped entirely while you're scrolled up through history, what's
