@@ -56,7 +56,7 @@ const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2}
 // (overloaded). Nothing about it is quota, so there's nothing /usage could
 // confirm — it clears on its own. All we do is wait a short while and retry.
 // Whitespace is loose because the line can be re-wrapped at narrow widths.
-const apiErrorRegex: RegExp = /●\s*API Error:\s*529/i;
+const apiErrorRegex: RegExp = /●\s*API Error:/i;
 
 // How long to sit out a 529 before sending "continue" again.
 const API_ERROR_COOLDOWN_MS: number = 5 * 60 * 1000;
