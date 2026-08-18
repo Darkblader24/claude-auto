@@ -18,8 +18,9 @@
 CLI. It runs `claude` inside a pseudo-terminal and forwards your keystrokes and
 Claude's output untouched, so the TUI looks and behaves **exactly** as it always has.
 
-The difference: when Claude reports that you've hit your session limit, `claude-auto` sends
-a quick `/usage` command to confirm the limit, counts it down in your window title, and sends `continue` 
+The difference: when Claude reports that you've hit a usage limit — your session limit,
+your weekly limit, or your monthly spend limit — `claude-auto` sends a quick `/usage` command to confirm the
+limit, counts it down in your window title, and sends `continue` 
 the moment your quota is back. No babysitting, no lost context.
 
 The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/package/@hotox/claude-auto).
@@ -162,25 +163,34 @@ characters actually on display, mirrored into a headless
 stream. That means it sees what you see, and isn't fooled by redraws, spinners,
 or partial writes.
 
-When a session-limit banner appears:
+A **limit banner** is any of the wordings Claude uses to say you're out of quota —
+"You've hit your session limit ∙ resets 11:50am", "You've hit your weekly limit" and
+"You've hit your monthly spend limit" today. They're aliases of each other: whichever appears, the handling below is
+identical. New wordings are a one-line addition to `LIMIT_PATTERNS` in `claude-auto.ts`.
+
+When a limit banner appears:
 
 1. **If Claude is offering its "Stop and wait for limit to reset" menu**, it
    selects that option for you.
 2. **Otherwise it confirms the limit against `/usage`.** It opens Claude's
-   `/usage` panel and reads the *Current session* blocks percent used and reset
+   `/usage` panel and reads the two bars that can stop a session: *Current
+   session* and *Current week (all models)*, each one's percent used and reset
    time. Only a bar at **100% used** confirms the limit, so a stale banner on
-   screen can't trigger a false positive. If the window is too small to show the
-   block, the panel is scrolled step by step until both values have been read.
-   Then the panel is closed with Esc.
+   screen can't trigger a false positive — and a banner is only written off as
+   stale when *neither* bar is spent. If the window is too small to show both
+   blocks, the panel is scrolled step by step until they've been read. Then the
+   panel is closed with Esc.
 3. **Then it waits.** It counts down to the reset time reported by `/usage`
    (plus a one-minute safety buffer) — more precise than the rounded time in the
-   banner — showing the remaining time in your window title, and sends
-   `continue` when the clock runs out.
+   banner, and the only source when the banner carries no time at all — showing
+   the remaining time in your window title, and sends `continue` when the clock
+   runs out. When both bars are spent it waits for the later of the two, since
+   resuming while the weekly quota is still gone would only hit the limit again.
 
 **Overload errors** (`● API Error: 529`) are handled the same way, minus the
 verification: there's no quota involved, so there's nothing `/usage` could
 confirm. `claude-auto` just counts down five minutes and sends `continue`. If the
-error comes back, so does the countdown. A session-limit banner takes precedence
+error comes back, so does the countdown. A limit banner takes precedence
 — when you're out of quota, retrying in five minutes would only hit the limit
 again.
 
@@ -194,12 +204,22 @@ Some more details:
   and resumes the moment you've answered.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
-- A banner that `/usage` disproves (session below 100%) is remembered by its reset
-  time and is ignored until a real limit is hit, or after 3 hours, whichever
-  comes first.
-- The weekly rows in `/usage` also say "% used", but only text between the
-  *Current session* heading and the next section is ever parsed, so they can't
-  be mistaken for the session bar.
+- A banner that `/usage` disproves (every bar below 100%) is remembered — by its
+  wording and the reset time it carried — and is ignored until a real limit is hit,
+  or after 3 hours, whichever comes first. A later banner resetting at a different
+  time is a different banner, so it's still checked.
+- Every row in `/usage` says "% used", so each value is only ever read from the
+  section it belongs to and the bars can't be confused for one another. The
+  *Current week (Opus)* row is deliberately not treated as a limit: Claude Code
+  falls back to Sonnet rather than stopping, so it never blocks a session.
+- A session bar at 0% prints no reset line at all — that's expected, not a failed
+  read. It just means the session isn't the limit you're waiting on.
+- Weekly resets are days out, so they print a date ("Resets Jul 22, 8am") rather
+  than a clock time. The year isn't shown; it's taken as the current one, rolling
+  into the next when the date is already well behind us. A reset that reads as
+  already past still leaves a five-minute gap before resuming, so a just-missed
+  reset — or a machine clock offset from the timezone `/usage` prints — can't
+  turn into a resume-and-retry spin.
 - Nothing is ever written to stdout or stderr. That would corrupt the TUI, so all
   diagnostics go to the optional log file.
 

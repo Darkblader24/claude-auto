@@ -48,9 +48,32 @@ const forwardedArgs: string[] = [...cliArgs, ...permissionModeArgs(cliArgs)];
 // CONFIG
 // ==========================================
 
-// Anchored on "hit your session limit" so the percentage early-warning doesn't
-// trip it. Time is lenient: optional minutes, optional space, any case am/pm.
-const limitRegex: RegExp = /hit your session limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+// Every phrase that means "out of quota — wait for the reset". They're aliases:
+// whichever matches, the handling is identical (same guards, same /usage
+// confirmation, same countdown), so adding a wording is a one-line change here.
+//
+// Rules for a new entry:
+//   * Anchor on the "you've hit it" wording, never on a percentage — Claude
+//     shows early warnings ("90% of your limit used") that must not trip this.
+//   * A reset clock time may be captured in groups 1–3 (hours, optional minutes,
+//     am/pm), but it's optional: the countdown always uses the time /usage
+//     reports, and the banner's own time only tells two banners apart (see
+//     DISPROVED_LIMIT_WINDOW_MS). Patterns without one work fine.
+//   * Match against the *rendered* screen, so keep whitespace lenient — a line
+//     can be re-wrapped at narrow widths — and expect no colour codes.
+const LIMIT_PATTERNS: RegExp[] = [
+    // "⎿  You've hit your monthly spend limit." — the spend cap on extra usage.
+    // No reset time in the line, so /usage supplies it: see USAGE_CONFIRM_PCT.
+    /⎿\s+ *you've\s+hit\s+your\s+monthly\s+spend\s+limit/i,
+    // "⎿  You've hit your weekly limit ∙ resets Jul 22, 8am". The reset clause
+    // is optional here, unlike the session one below: a weekly reset is days out,
+    // so it prints a date, which the clock-time groups can't match — requiring
+    // them would mean never matching this banner at all. /usage times the wait.
+    /⎿\s+ *you've\s+hit\s+your\s+weekly\s+limit(?:[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm))?/i,
+    // "⎿  You've hit your session limit ∙ resets 11:50am". Time is lenient:
+    // optional minutes, optional space, any case am/pm.
+    /⎿\s+ *you've\s+hit\s+your\s+session\s+limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i,
+];
 
 // A transient upstream failure, rendered into the transcript as "● API Error: 529"
 // (overloaded). Nothing about it is quota, so there's nothing /usage could
@@ -85,9 +108,9 @@ const SCROLL_INDICATOR: string = ') ↓';
 const RESUME_PROMPT_TEXT: string = '❯ resume from summary';
 
 // A candidate limit is verified through the /usage panel instead of a chat
-// probe: we open it, read the "Current session" block (percent used + reset
-// time), and close it again. The reset time shown there is authoritative —
-// banner times are rounded and the banner itself can be stale.
+// probe: we open it, read the bars for the limits that can block a session
+// (percent used + reset time), and close it again. The reset times shown there
+// are authoritative — banner times are rounded and the banner itself can be stale.
 const USAGE_COMMAND: string = '/usage';
 // Pause between typing the command and pressing Enter, so the slash-command
 // autocomplete has settled on /usage before we submit it.
@@ -95,17 +118,54 @@ const USAGE_MENU_SETTLE_MS: number = 500;
 // Pause after Enter before the first read, so the panel has rendered.
 const USAGE_RENDER_DELAY_MS: number = 1500;
 
-// Headings that bracket the block we read. The weekly rows below it also say
-// "% used", so anything past USAGE_NEXT_HEADING must never be matched.
-const USAGE_SESSION_HEADING: string = 'current session';
-const USAGE_NEXT_HEADING: string = 'current week';
-// "███ 54% used" and "Resets 11:50am (Europe/Berlin)". The weekly rows show a
-// date instead ("Resets Jul 15, 8am"), which the time-only regex skips.
+// The panel is a stack of sections, each a heading followed by "███ 54% used"
+// and usually a "Resets …" line. Two of them are limits we can wait out; the
+// others are listed only as terminators, so that a percentage is never read
+// against the wrong limit:
+//
+//   Current session            the rolling session window — "Resets 11:50am"
+//   Current week (all models)  the plan's weekly quota — "Resets Jul 22, 8am"
+//   Current week (Opus)        Opus only: Claude Code drops to Sonnet rather
+//                              than stopping, so it never blocks a session
+//   What's contributing …      trailing prose, no limit of its own
+//
+// Order matters: "(all models)" is tried before the bare "current week", or the
+// Opus row would be taken for the plan quota. See findHeadings.
+type UsageSection = 'session' | 'weekly' | 'other';
+
+const USAGE_HEADINGS: { section: UsageSection; pattern: RegExp }[] = [
+    { section: 'session', pattern: /current\s+session/i },
+    { section: 'weekly', pattern: /current\s+week\s*\(\s*all\s+models\s*\)/i },
+    { section: 'other', pattern: /current\s+week/i },
+    { section: 'other', pattern: /what.s\s+contributing/i },
+];
+
+// "███ 54% used", plus the two shapes a reset line takes. The session prints a
+// clock time ("Resets 11:50am (Europe/Berlin)"); the weekly rows are days out so
+// they print a date as well ("Resets Jul 22, 8am (Europe/Berlin)"). Neither
+// regex can match the other's line — one needs a digit after "resets", the other
+// a month name — so a leaky region can't cross the two.
 const usagePercentRegex: RegExp = /(\d{1,3})\s*%\s*used/i;
 const usageResetRegex: RegExp = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+const usageWeeklyResetRegex: RegExp = /resets\s+([a-z]{3,9})\s+(\d{1,2})\s*,?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+const MONTH_ABBREVIATIONS: string[] =
+    ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
-// The panel confirms a limit only when the session bar reads 100% used.
-// Anything less means the banner that triggered us was stale.
+// The weekly reset line carries no year. Reading one slightly in the past is
+// normal — the panel is a snapshot — but a date months behind us is next year's,
+// which happens for one week every New Year.
+const USAGE_WEEKLY_BACKDATE_MS: number = 24 * 60 * 60 * 1000;
+
+// A bar confirms its limit only when it reads 100% used; anything less means the
+// banner that triggered us was stale. The same threshold serves both bars, and
+// either one at 100% blocks the session on its own — so a banner is stale only
+// when *neither* is spent.
+//
+// Between them they cover every phrase in LIMIT_PATTERNS, including "you've hit
+// your monthly spend limit", which names neither. Extra usage is only ever spent
+// once the included plan quota is gone, so that banner can't appear while both
+// bars are still climbing: by then one of them reads 100%, and waiting for it to
+// come back is exactly what puts us back on plan quota.
 const USAGE_CONFIRM_PCT: number = 100;
 
 // When the window is too small to show the whole block at once, we scroll the
@@ -118,10 +178,13 @@ const USAGE_MAX_SCROLL_STEPS: number = 40;
 const USAGE_CLOSE_KEY: string = '\x1b';
 const USAGE_CLOSE_DELAY_MS: number = 500;
 
-// A banner /usage disproved (session below 100%) is remembered by its reset time
-// and never verified again — re-opening the panel for it would find the same
-// answer. It's re-armed when a real limit is hit, or after this long, by which
-// point the same clock time belongs to a later session.
+// A banner /usage disproved (session below 100%) is remembered — by which
+// pattern matched and the reset time it carried — and never verified again:
+// re-opening the panel for it would find the same answer. A later banner with a
+// different reset time is a different banner and still gets checked. It's
+// re-armed when a real limit is hit, or after this long, by which point the same
+// clock time belongs to a later session (and a pattern that carries no time at
+// all — where every banner looks alike — is only muted for this long).
 const DISPROVED_LIMIT_WINDOW_MS: number = 3 * 60 * 60 * 1000;
 
 // When /usage couldn't be read at all we've learned nothing about the banner, so
@@ -130,6 +193,15 @@ const USAGE_RETRY_COOLDOWN_MS: number = 5 * 60 * 1000;
 
 // Safety margin added on top of the /usage reset time before we resume.
 const WAIT_BUFFER_MS: number = 60 * 1000;
+
+// A reset the panel reports as already past still has to leave a gap before we
+// resume, or a limit that's in fact still live would spin: resume, banner,
+// verify, resume, seconds apart. It happens when a reset has only just gone by,
+// and it happens for as long as hours if the machine's clock is offset from the
+// timezone /usage prints its times in. A session reset rolls forward a whole day
+// on its own (resumeTimeFrom); a weekly date is absolute and can't, so this is
+// the backstop for it.
+const MIN_WAIT_MS: number = 5 * 60 * 1000;
 
 // The text sent to continue a session
 const RESUME_CONTINUE_TEXT: string = 'continue';
@@ -587,9 +659,9 @@ let isWaiting: boolean = false;     // a confirmed limit countdown is running
 let isVerifying: boolean = false;   // /usage panel is open for verification
 let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
 let countdownInterval: NodeJS.Timeout | null = null;
-let disprovedResetMinutes: number | null = null; // banner reset /usage said wasn't a limit
-let disprovedAt: number = 0;                     // wall-clock time /usage disproved it
-let usageRetryUntil: number = 0;             // no /usage re-read before this (read failed)
+let disprovedBannerKey: string | null = null; // identity of the banner /usage said wasn't a limit
+let disprovedAt: number = 0;                  // wall-clock time /usage disproved it
+let usageRetryUntil: number = 0;              // no /usage re-read before this (read failed)
 let captureInterval: NodeJS.Timeout | null = null;
 let currentScreen: string = '';
 
@@ -881,12 +953,15 @@ function logScreen(screen: string = currentScreen, msg: string = "SCREEN"): void
 // ==========================================
 // LIMIT DETECTION
 // ==========================================
-// Parse a reset clock time match into minutes-of-day (0–1439). Both the banner
-// regex and the /usage regex capture (hours)(:minutes)(am/pm) in groups 1–3.
-function resetMinutes(match: RegExpMatchArray): number {
-    let hours: number = parseInt(match[1]!, 10);
+// Parse a reset clock time match into minutes-of-day (0–1439), or null when the
+// pattern didn't capture one. Both the banner patterns and the /usage regex put
+// (hours)(:minutes)(am/pm) in groups 1–3 — but a limit phrase need not carry a
+// time at all (see LIMIT_PATTERNS), in which case there's nothing to parse.
+function resetMinutes(match: RegExpMatchArray): number | null {
+    if (match[1] === undefined || match[3] === undefined) return null;
+    let hours: number = parseInt(match[1], 10);
     const minutes: number = match[2] ? parseInt(match[2], 10) : 0;
-    const ampm: string = match[3]!.toLowerCase();
+    const ampm: string = match[3].toLowerCase();
     if (ampm === 'pm' && hours < 12) hours += 12;
     if (ampm === 'am' && hours === 12) hours = 0;
     return hours * 60 + minutes;
@@ -902,6 +977,38 @@ function lastMatch(screen: string, pattern: RegExp): { index: number; match: Reg
     let m: RegExpExecArray | null;
     while ((m = re.exec(screen)) !== null) last = m;
     return last === null ? null : { index: last.index, match: last };
+}
+
+interface LimitBanner {
+    index: number;   // where it starts on screen, for the staleness test
+    text: string;    // what matched, for the log
+    key: string;     // identity for the disproof memo
+}
+
+// The newest limit banner on screen, whichever phrasing it used: every pattern
+// is searched and the one furthest down wins, because that's the one that says
+// whether we're still limited.
+//
+// `key` is what a disproof is remembered under, so it has to name the *limit*,
+// not the pixels: the pattern that matched plus the reset time it carried. Two
+// renders of one banner (re-wrapped, or with a live "try again in 34m" inside
+// the match) share a key; a later limit resetting at a different time doesn't,
+// so it's verified afresh. A phrase carrying no time has one key for all its
+// banners — every one after a disproof stays muted for DISPROVED_LIMIT_WINDOW_MS.
+function lastLimitBanner(screen: string): LimitBanner | null {
+    let newest: LimitBanner | null = null;
+    for (const [patternIndex, pattern] of LIMIT_PATTERNS.entries()) {
+        const found = lastMatch(screen, pattern);
+        if (found === null) continue;
+        if (newest !== null && found.index <= newest.index) continue;
+        const minutes: number | null = resetMinutes(found.match);
+        newest = {
+            index: found.index,
+            text: found.match[0],
+            key: `${patternIndex}@${minutes ?? 'no-reset-time'}`,
+        };
+    }
+    return newest;
 }
 
 // True when the "continue" we send on resume sits below `index` — i.e. we've
@@ -959,7 +1066,7 @@ function handleLimitBanner(screen: string): boolean {
     // below it, we've already resumed past this banner — it's stale scrollback,
     // so ignore it. A genuinely still-live limit renders below that continue, so
     // its banner has nothing after it and falls through to /usage.
-    const banner = lastMatch(screen, limitRegex);
+    const banner = lastLimitBanner(screen);
     if (banner === null) return false;
 
     if (alreadyResumedPast(screen, banner.index)) {
@@ -967,15 +1074,13 @@ function handleLimitBanner(screen: string): boolean {
         return false;
     }
 
-    const bannerMinutes = resetMinutes(banner.match);
-
     // This exact banner was already checked against /usage and disproved. Opening
     // the panel again would only find the same answer, so leave it alone until a
     // real limit re-arms detection or the window expires.
-    if (disprovedResetMinutes !== null &&
-        bannerMinutes === disprovedResetMinutes &&
+    if (disprovedBannerKey !== null &&
+        banner.key === disprovedBannerKey &&
         Date.now() - disprovedAt < DISPROVED_LIMIT_WINDOW_MS) {
-        log('Same reset /usage already disproved — ignoring');
+        log('Same banner /usage already disproved — ignoring');
         return false;
     }
 
@@ -987,9 +1092,9 @@ function handleLimitBanner(screen: string): boolean {
 
     // Candidate limit on the live screen. Confirm it against /usage: the banner
     // is only trusted when the Current session bar actually reads 100% used.
-    log('Possible session limit — opening /usage to verify');
+    log(`Possible limit ("${banner.text.replace(/\s+/g, ' ').trim()}") — opening /usage to verify`);
     isVerifying = true;
-    verifyViaUsage(bannerMinutes)
+    verifyViaUsage(banner.key)
         .catch(err => log(`/usage verification error: ${err}`))
         .finally(() => { isVerifying = false; });
     return true;
@@ -1015,33 +1120,77 @@ function handleApiError(screen: string): void {
 // ==========================================
 // /usage VERIFICATION
 // ==========================================
-interface SessionUsage {
-    percentUsed: number;
-    resetMinutesOfDay: number;
+interface UsageReading {
+    sessionPercentUsed: number;
+    sessionResetMinutesOfDay: number | null; // the panel omits it while the bar reads 0%
+    weeklyPercentUsed: number | null;        // null when the panel shows no weekly row
+    weeklyResetAtMs: number | null;
 }
 
-async function verifyViaUsage(bannerMinutes: number): Promise<void> {
-    const usage = await readSessionUsage();
+async function verifyViaUsage(bannerKey: string): Promise<void> {
+    const usage = await readUsagePanel();
     if (usage === null) {
         usageRetryUntil = Date.now() + USAGE_RETRY_COOLDOWN_MS;
         log('Could not read the Current session block from /usage — will retry after backoff');
         return;
     }
-    log(`/usage read: session ${usage.percentUsed}% used, resets at minutes-of-day ${usage.resetMinutesOfDay}`);
-    if (usage.percentUsed < USAGE_CONFIRM_PCT) {
-        disprovedResetMinutes = bannerMinutes;
+    log(`/usage read: session ${usage.sessionPercentUsed}% used` +
+        `, resets at minutes-of-day ${usage.sessionResetMinutesOfDay ?? 'n/a'}` +
+        `; week ${usage.weeklyPercentUsed ?? 'n/a'}% used` +
+        `, resets ${usage.weeklyResetAtMs === null ? 'n/a' : new Date(usage.weeklyResetAtMs).toLocaleString()}`);
+
+    // The limits that are actually spent, each with the moment it comes back.
+    // Either bar at 100% stops the session on its own, so both are collected: we
+    // wait for the last of them, since resuming while the other is still spent
+    // would only walk into the banner again.
+    const exhausted: { name: string; resumeAt: number | null }[] = [];
+    if (usage.sessionPercentUsed >= USAGE_CONFIRM_PCT) {
+        exhausted.push({
+            name: 'session',
+            resumeAt: usage.sessionResetMinutesOfDay === null
+                ? null
+                : resumeTimeFrom(usage.sessionResetMinutesOfDay),
+        });
+    }
+    if (usage.weeklyPercentUsed !== null && usage.weeklyPercentUsed >= USAGE_CONFIRM_PCT) {
+        // Already an absolute date, so unlike the session it needs no rolling
+        // forward — only the same safety margin.
+        exhausted.push({
+            name: 'week',
+            resumeAt: usage.weeklyResetAtMs === null ? null : usage.weeklyResetAtMs + WAIT_BUFFER_MS,
+        });
+    }
+
+    if (exhausted.length === 0) {
+        disprovedBannerKey = bannerKey;
         disprovedAt = Date.now();
-        log('Session below 100% — banner is stale, ignoring this reset from now on');
+        log(`Every limit below ${USAGE_CONFIRM_PCT}% — banner ${bannerKey} is stale, ignoring it from now on`);
+        return;
+    }
+
+    // A spent limit whose reset line didn't parse can't be counted down to, and
+    // it isn't a disproof either — the limit is real. Fall back to any other
+    // spent limit, and if there's none, treat the read as failed and retry.
+    const resumeTimes: number[] = [];
+    for (const limit of exhausted) {
+        if (limit.resumeAt === null) log(`The ${limit.name} limit is spent but its reset line didn't parse`);
+        else resumeTimes.push(limit.resumeAt);
+    }
+    if (resumeTimes.length === 0) {
+        usageRetryUntil = Date.now() + USAGE_RETRY_COOLDOWN_MS;
+        log('Limit confirmed but no reset time to count down to — will retry after backoff');
         return;
     }
 
     // A real limit ends any prior disproof: whatever banner we'd written off
     // belongs to a session that's over, so the next one gets verified again.
-    disprovedResetMinutes = null;
+    disprovedBannerKey = null;
     disprovedAt = 0;
     usageRetryUntil = 0;
 
-    startCountdown(resumeTimeFrom(usage.resetMinutesOfDay));
+    log(`Confirmed by /usage: ${exhausted.map(l => l.name).join(' + ')} at ${USAGE_CONFIRM_PCT}%`);
+    const resumeAt: number = Math.max(...resumeTimes);
+    startCountdown(resumeAt < Date.now() ? Date.now() + MIN_WAIT_MS : resumeAt);
 }
 
 // The absolute time to resume at, from a reset clock time in minutes-of-day:
@@ -1059,19 +1208,77 @@ function resumeTimeFrom(targetMinutesOfDay: number): number {
     return targetTimeMs;
 }
 
-// Open the /usage panel and read the "Current session" block. When the window
-// is too small to show the whole block, scroll the panel one step at a time and
-// keep reading until both the percentage and the reset time have been seen.
-// Always closes the panel (Esc) before returning.
-async function readSessionUsage(): Promise<SessionUsage | null> {
+// Every heading on screen, in the order they appear. A heading overlapping one
+// already found is dropped, which is what keeps "Current week (all models)" from
+// being taken for the bare "current week" terminator as well: USAGE_HEADINGS
+// lists the specific pattern first, so the specific one claims the spot.
+function findHeadings(screen: string): { index: number; end: number; section: UsageSection }[] {
+    const found: { index: number; end: number; section: UsageSection }[] = [];
+    for (const { section, pattern } of USAGE_HEADINGS) {
+        const re: RegExp = new RegExp(pattern.source, 'gi');
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(screen)) !== null) {
+            const [index, end] = [m.index, m.index + m[0].length];
+            if (found.some(h => index < h.end && h.index < end)) continue;
+            found.push({ index, end, section });
+        }
+    }
+    return found.sort((a, b) => a.index - b.index);
+}
+
+// The visible panel cut into its sections. `carried` is the section the previous
+// screen ended in: the panel scrolls a line at a time, so a block's tail often
+// arrives with its own heading already off the top, and that text still belongs
+// to it. With nothing carried, text above the first heading (the cost summary at
+// the top of the panel) belongs to no limit and is dropped.
+function splitIntoSections(screen: string, carried: UsageSection | null): { section: UsageSection; text: string }[] {
+    const headings = findHeadings(screen);
+    const regions: { section: UsageSection; text: string }[] = [];
+    const firstIdx: number = headings[0]?.index ?? screen.length;
+    if (carried !== null && firstIdx > 0) regions.push({ section: carried, text: screen.slice(0, firstIdx) });
+    for (const [i, heading] of headings.entries()) {
+        regions.push({ section: heading.section, text: screen.slice(heading.index, headings[i + 1]?.index ?? screen.length) });
+    }
+    return regions;
+}
+
+// Absolute time for a weekly reset line ("Resets Jul 22, 8am"), or null if the
+// month name isn't one. Groups: month, day, hours, optional minutes, am/pm. The
+// panel prints no year, so we take the current one and step forward when that
+// lands well in the past — a weekly reset is always ahead of us, so a January
+// date read in late December belongs to next year.
+function weeklyResetTime(match: RegExpMatchArray): number | null {
+    const month: number = MONTH_ABBREVIATIONS.indexOf(match[1]!.slice(0, 3).toLowerCase());
+    if (month === -1) return null;
+    const day: number = parseInt(match[2]!, 10);
+    let hours: number = parseInt(match[3]!, 10);
+    const minutes: number = match[4] ? parseInt(match[4], 10) : 0;
+    const ampm: string = match[5]!.toLowerCase();
+    if (ampm === 'pm' && hours < 12) hours += 12;
+    if (ampm === 'am' && hours === 12) hours = 0;
+
+    const now = new Date();
+    const at = (year: number): number => new Date(year, month, day, hours, minutes, 0, 0).getTime();
+    const thisYear: number = at(now.getFullYear());
+    return thisYear < Date.now() - USAGE_WEEKLY_BACKDATE_MS ? at(now.getFullYear() + 1) : thisYear;
+}
+
+// Open the /usage panel and read the bars that can block a session: the current
+// one and the plan's weekly quota. When the window is too small to show them at
+// once, scroll the panel one step at a time and keep reading until everything
+// the decision needs has been seen. Always closes the panel (Esc) before
+// returning; null means even the session bar couldn't be read.
+async function readUsagePanel(): Promise<UsageReading | null> {
     ptyProcess.write(CLEAR_INPUT_SEQUENCE + USAGE_COMMAND);
     await sleep(USAGE_MENU_SETTLE_MS);
     ptyProcess.write('\r');
     await sleep(USAGE_RENDER_DELAY_MS);
 
-    let seenHeading = false;
-    let percentUsed: number | null = null;
-    let resetMinutesOfDay: number | null = null;
+    let sessionPercent: number | null = null;
+    let sessionReset: number | null = null;
+    let weeklyPercent: number | null = null;
+    let weeklyResetAtMs: number | null = null;
+    let openSection: UsageSection | null = null; // section the next screen opens in
     let previousScreen: string | null = null;
 
     for (let step = 0; step <= USAGE_MAX_SCROLL_STEPS; step++) {
@@ -1086,31 +1293,42 @@ async function readSessionUsage(): Promise<SessionUsage | null> {
         }
         previousScreen = screen;
 
-        // Only text between "Current session" and the next section counts: the
-        // weekly rows below also say "% used" and must never be picked up. Once
-        // the heading has scrolled off the top, the block's remaining lines are
-        // at the top of the panel, so the whole screen becomes the region.
-        let region: string | null = null;
-        const headingIdx = screen.toLowerCase().indexOf(USAGE_SESSION_HEADING);
-        if (headingIdx !== -1) {
-            seenHeading = true;
-            region = screen.slice(headingIdx);
-        } else if (seenHeading) {
-            region = screen;
-        }
-        if (region !== null) {
-            const nextIdx = region.toLowerCase().indexOf(USAGE_NEXT_HEADING);
-            if (nextIdx !== -1) region = region.slice(0, nextIdx);
-            if (percentUsed === null) {
-                const m = region.match(usagePercentRegex);
-                if (m) percentUsed = parseInt(m[1]!, 10);
+        // Values are only ever taken from the section they belong to, so the
+        // weekly rows — which also say "% used" — can't be read as the session
+        // bar, or the other way round.
+        for (const region of splitIntoSections(screen, openSection)) {
+            openSection = region.section;
+            if (region.section === 'session') {
+                if (sessionPercent === null) {
+                    const m = region.text.match(usagePercentRegex);
+                    if (m) sessionPercent = parseInt(m[1]!, 10);
+                }
+                if (sessionReset === null) {
+                    const m = region.text.match(usageResetRegex);
+                    if (m) sessionReset = resetMinutes(m);
+                }
+            } else if (region.section === 'weekly') {
+                if (weeklyPercent === null) {
+                    const m = region.text.match(usagePercentRegex);
+                    if (m) weeklyPercent = parseInt(m[1]!, 10);
+                }
+                if (weeklyResetAtMs === null) {
+                    const m = region.text.match(usageWeeklyResetRegex);
+                    if (m) weeklyResetAtMs = weeklyResetTime(m);
+                }
             }
-            if (resetMinutesOfDay === null) {
-                const m = region.match(usageResetRegex);
-                if (m) resetMinutesOfDay = resetMinutes(m);
-            }
-            if (percentUsed !== null && resetMinutesOfDay !== null) break;
         }
+
+        // A bar below 100% is one we'll never wait on, so its reset time isn't
+        // needed — which is just as well, since the session prints none at all
+        // while it reads 0%. On a plan with no weekly row nothing completes the
+        // weekly half and we simply scroll to the bottom, which is where the
+        // unchanged-screen check above stops us.
+        const sessionRead: boolean = sessionPercent !== null &&
+            (sessionPercent < USAGE_CONFIRM_PCT || sessionReset !== null);
+        const weeklyRead: boolean = weeklyPercent !== null &&
+            (weeklyPercent < USAGE_CONFIRM_PCT || weeklyResetAtMs !== null);
+        if (sessionRead && weeklyRead) break;
 
         if (step < USAGE_MAX_SCROLL_STEPS) {
             ptyProcess.write(USAGE_SCROLL_KEY);
@@ -1133,8 +1351,13 @@ async function readSessionUsage(): Promise<SessionUsage | null> {
     await sleep(USAGE_CLOSE_DELAY_MS);
     log("Window closed")
 
-    if (percentUsed === null || resetMinutesOfDay === null) return null;
-    return { percentUsed, resetMinutesOfDay };
+    if (sessionPercent === null) return null;
+    return {
+        sessionPercentUsed: sessionPercent,
+        sessionResetMinutesOfDay: sessionReset,
+        weeklyPercentUsed: weeklyPercent,
+        weeklyResetAtMs,
+    };
 }
 
 // Wait until `targetTimeMs`, then send "continue". The target is either the
@@ -1193,7 +1416,7 @@ function cancelCountdown(): void {
     }
     restoreTitle();
     isWaiting = false;
-    disprovedResetMinutes = null;
+    disprovedBannerKey = null;
     disprovedAt = 0;
     usageRetryUntil = 0;
     log('Countdown cancelled (F4) — detection re-armed');
