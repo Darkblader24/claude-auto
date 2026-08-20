@@ -18,9 +18,10 @@
 CLI. It runs `claude` inside a pseudo-terminal and forwards your keystrokes and
 Claude's output untouched, so the TUI looks and behaves **exactly** as it always has.
 
-The difference: when Claude reports that you've hit a usage limit — your session limit,
-your weekly limit, or your monthly spend limit — `claude-auto` sends a quick `/usage` command to confirm the
-limit, counts it down in your window title, and sends `continue` 
+The difference: when Claude stops — because you've hit a usage limit (session,
+weekly, or monthly spend), or because it parked the session at a **checkpoint**
+just short of one — `claude-auto` sends a quick `/usage` command to confirm it,
+counts the wait down in your window title, and sends `continue`
 the moment your quota is back. No babysitting, no lost context.
 
 The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/package/@hotox/claude-auto).
@@ -187,12 +188,33 @@ When a limit banner appears:
    runs out. When both bars are spent it waits for the later of the two, since
    resuming while the weekly quota is still gone would only hit the limit again.
 
+**Checkpoints** are the other way a session stops. Rather than running you into
+the hard limit, Claude now usually stops near the top of the window and writes a
+line like `● Checkpoint …`; the older `● Claude usage limit reached` wording has
+the same shape. Any line that *starts* with the assistant bullet and carries one
+of the phrases in `CHECKPOINT_PHRASES` (`checkpoint`, `usage limit` today) counts
+as one — adding a wording is a one-line change there.
+
+A checkpoint runs through everything above unchanged — the same staleness test,
+the same disproof memo, the same `/usage` panel read, the same countdown — with
+one difference: it fires *before* the session is spent, so the 100% rule would
+never confirm it. The **Current session** bar only has to read **95% used**
+(`CHECKPOINT_CONFIRM_PCT`). Below that, the line is written off as stale and
+ignored, exactly like a disproved banner. The weekly bar still has to read 100%,
+so a week sitting at 96% can't park the wrapper for days over a limit that isn't
+blocking anything.
+
+Because the phrase only has to appear on a bulleted line, a tool call that
+happens to mention it (`● Bash(grep -n "checkpoint" …)`) is a possible false
+positive. It costs one `/usage` check, which disproves it — and the disproof is
+remembered, so it stays quiet from then on.
+
 **Overload errors** (`● API Error: 529`) are handled the same way, minus the
 verification: there's no quota involved, so there's nothing `/usage` could
 confirm. `claude-auto` just counts down five minutes and sends `continue`. If the
-error comes back, so does the countdown. A limit banner takes precedence
-— when you're out of quota, retrying in five minutes would only hit the limit
-again.
+error comes back, so does the countdown. A limit banner and a checkpoint both
+take precedence — when you're out of quota, retrying in five minutes would only
+hit the limit again.
 
 Some more details:
 
@@ -204,10 +226,11 @@ Some more details:
   and resumes the moment you've answered.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
-- A banner that `/usage` disproves (every bar below 100%) is remembered — by its
-  wording and the reset time it carried — and is ignored until a real limit is hit,
-  or after 3 hours, whichever comes first. A later banner resetting at a different
-  time is a different banner, so it's still checked.
+- A banner that `/usage` disproves (no bar as full as the threshold that applies
+  to it) is remembered — by its kind, its wording, and the reset time it carried
+  — and is ignored until a real limit is hit, or after 3 hours, whichever comes
+  first. A later banner resetting at a different time is a different banner, so
+  it's still checked, and a disproved checkpoint never mutes a limit banner.
 - Every row in `/usage` says "% used", so each value is only ever read from the
   section it belongs to and the bars can't be confused for one another. The
   *Current week (Opus)* row is deliberately not treated as a limit: Claude Code

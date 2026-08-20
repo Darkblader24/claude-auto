@@ -75,6 +75,42 @@ const LIMIT_PATTERNS: RegExp[] = [
     /⎿\s+ *you've\s+hit\s+your\s+session\s+limit[\s\S]{0,80}?resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i,
 ];
 
+// Claude no longer always runs a session into its hard limit. Near the top of the
+// window it stops on its own and writes a checkpoint line instead — "● Checkpoint
+// created …" — and the same shape carries the "● Claude usage limit reached" wording.
+// Either way the session is parked until something sends "continue", so these are
+// handled exactly like a limit banner: same guards, same /usage confirmation, same
+// countdown. The one difference is the bar reading that confirms them, because a
+// checkpoint fires *before* the session is spent (see CHECKPOINT_CONFIRM_PCT).
+//
+// Rules for a new entry: it's matched against a line that starts with the assistant
+// bullet, and the phrase has to sit on that same line — so "checkpoint" written
+// anywhere in Claude's own prose can't trip this. Keep entries lowercase (matching
+// is case-insensitive) and plain: they're spliced into a regex, with the spaces
+// between words made lenient so a re-render can't break a match.
+const CHECKPOINT_PHRASES: string[] = [
+    'checkpoint',
+    'usage limit',
+];
+
+// The bullet has to open the line and the phrase has to sit on it: (?:^|\n) is
+// the line start (a /m anchor wouldn't survive lastMatch recompiling the pattern
+// with flags of its own), and every gap after it is horizontal whitespace or
+// "anything but a newline", so a match can never run across two lines.
+const CHECKPOINT_PATTERNS: RegExp[] = CHECKPOINT_PHRASES.map(phrase => new RegExp(
+    '(?:^|\n)[ \t]*●[^\n]*?' + phrase.split(/\s+/).join('[ \t]+'), 'i'));
+
+// A checkpoint is Claude stopping *near* the top of the window rather than at it,
+// so the 100% rule that confirms a limit banner would never fire for one. The
+// session bar has to read at least this much before we count down; below it the
+// line is written off as stale, exactly like a disproved banner.
+//
+// Only the session bar is judged by this threshold — the weekly bar keeps
+// USAGE_CONFIRM_PCT. A week sitting at 96% still runs sessions fine and resets
+// days out, so counting down to it on a checkpoint would park the wrapper for
+// days over a limit that isn't blocking anything.
+const CHECKPOINT_CONFIRM_PCT: number = 95;
+
 // A transient upstream failure, rendered into the transcript as "● API Error: 529"
 // (overloaded). Nothing about it is quota, so there's nothing /usage could
 // confirm — it clears on its own. All we do is wait a short while and retry.
@@ -166,6 +202,10 @@ const USAGE_WEEKLY_BACKDATE_MS: number = 24 * 60 * 60 * 1000;
 // once the included plan quota is gone, so that banner can't appear while both
 // bars are still climbing: by then one of them reads 100%, and waiting for it to
 // come back is exactly what puts us back on plan quota.
+//
+// Checkpoints are the exception: they appear before the session is spent, so the
+// session bar is judged against CHECKPOINT_CONFIRM_PCT for those. The weekly bar
+// is held to this threshold either way.
 const USAGE_CONFIRM_PCT: number = 100;
 
 // When the window is too small to show the whole block at once, we scroll the
@@ -985,19 +1025,21 @@ interface LimitBanner {
     key: string;     // identity for the disproof memo
 }
 
-// The newest limit banner on screen, whichever phrasing it used: every pattern
-// is searched and the one furthest down wins, because that's the one that says
-// whether we're still limited.
+// The newest banner of one kind on screen, whichever phrasing it used: every
+// pattern is searched and the one furthest down wins, because that's the one
+// that says whether we're still stopped.
 //
 // `key` is what a disproof is remembered under, so it has to name the *limit*,
-// not the pixels: the pattern that matched plus the reset time it carried. Two
-// renders of one banner (re-wrapped, or with a live "try again in 34m" inside
-// the match) share a key; a later limit resetting at a different time doesn't,
-// so it's verified afresh. A phrase carrying no time has one key for all its
-// banners — every one after a disproof stays muted for DISPROVED_LIMIT_WINDOW_MS.
-function lastLimitBanner(screen: string): LimitBanner | null {
+// not the pixels: the kind, the pattern that matched, and the reset time it
+// carried. Two renders of one banner (re-wrapped, or with a live "try again in
+// 34m" inside the match) share a key; a later limit resetting at a different time
+// doesn't, so it's verified afresh. A phrase carrying no time has one key for all
+// its banners — every one after a disproof stays muted for
+// DISPROVED_LIMIT_WINDOW_MS. The kind is in the key so that a disproved
+// checkpoint can't mute a limit banner, or the other way round.
+function newestBanner(screen: string, patterns: RegExp[], kind: string): LimitBanner | null {
     let newest: LimitBanner | null = null;
-    for (const [patternIndex, pattern] of LIMIT_PATTERNS.entries()) {
+    for (const [patternIndex, pattern] of patterns.entries()) {
         const found = lastMatch(screen, pattern);
         if (found === null) continue;
         if (newest !== null && found.index <= newest.index) continue;
@@ -1005,7 +1047,7 @@ function lastLimitBanner(screen: string): LimitBanner | null {
         newest = {
             index: found.index,
             text: found.match[0],
-            key: `${patternIndex}@${minutes ?? 'no-reset-time'}`,
+            key: `${kind}#${patternIndex}@${minutes ?? 'no-reset-time'}`,
         };
     }
     return newest;
@@ -1054,23 +1096,38 @@ function detectLimit(screen: string): void {
     }
 
     // A session limit outranks a 529: if we're out of quota, retrying in five
-    // minutes would just hit the limit again.
+    // minutes would just hit the limit again. A checkpoint outranks it for the
+    // same reason — "● Claude usage limit reached" is quota, not an overload —
+    // but it comes second, since an outright limit banner is the better evidence
+    // when both are on screen.
     if (handleLimitBanner(screen)) return;
+    if (handleCheckpointBanner(screen)) return;
     handleApiError(screen);
 }
 
-// Returns true when a live limit banner was found and verification started, so
-// the caller knows the screen is spoken for.
-function handleLimitBanner(screen: string): boolean {
-    // Newest limit banner on screen. If the "continue" we sent on resume sits
-    // below it, we've already resumed past this banner — it's stale scrollback,
-    // so ignore it. A genuinely still-live limit renders below that continue, so
-    // its banner has nothing after it and falls through to /usage.
-    const banner = lastLimitBanner(screen);
+// A limit banner and a checkpoint are the same situation — the session has
+// stopped and won't restart on its own — so both run through one handler, and
+// with it one set of safeguards: the resumed-"continue" staleness test, the
+// disproof memo, the /usage backoff, and the /usage confirmation itself. The
+// only thing that differs is how full the session bar has to read before the
+// stop counts as real (see CHECKPOINT_CONFIRM_PCT).
+//
+// Returns true when a live banner was found and verification started, so the
+// caller knows the screen is spoken for.
+function handleStopBanner(
+    screen: string,
+    banner: LimitBanner | null,
+    label: string,
+    sessionConfirmPct: number,
+): boolean {
     if (banner === null) return false;
 
+    // If the "continue" we sent on resume sits below the banner, we've already
+    // resumed past it — it's stale scrollback, so ignore it. A genuinely still-live
+    // stop renders below that continue, so it has nothing after it and falls
+    // through to /usage.
     if (alreadyResumedPast(screen, banner.index)) {
-        log('Limit banner sits above a resumed "continue" — ignoring as stale');
+        log(`${label} sits above a resumed "continue" — ignoring as stale`);
         return false;
     }
 
@@ -1080,24 +1137,40 @@ function handleLimitBanner(screen: string): boolean {
     if (disprovedBannerKey !== null &&
         banner.key === disprovedBannerKey &&
         Date.now() - disprovedAt < DISPROVED_LIMIT_WINDOW_MS) {
-        log('Same banner /usage already disproved — ignoring');
+        log(`Same ${label.toLowerCase()} /usage already disproved — ignoring`);
         return false;
     }
 
     // A previous /usage read failed; back off before opening the panel again.
     if (Date.now() < usageRetryUntil) {
-        log('Limit text on screen but inside /usage retry backoff — ignoring');
+        log(`${label} on screen but inside /usage retry backoff — ignoring`);
         return false;
     }
 
-    // Candidate limit on the live screen. Confirm it against /usage: the banner
-    // is only trusted when the Current session bar actually reads 100% used.
-    log(`Possible limit ("${banner.text.replace(/\s+/g, ' ').trim()}") — opening /usage to verify`);
+    // Candidate stop on the live screen. Confirm it against /usage: the banner is
+    // only trusted when the Current session bar actually reads full enough.
+    log(`Possible ${label.toLowerCase()} ("${banner.text.replace(/\s+/g, ' ').trim()}")` +
+        ` — opening /usage to verify against ${sessionConfirmPct}%`);
     isVerifying = true;
-    verifyViaUsage(banner.key)
+    verifyViaUsage(banner.key, sessionConfirmPct)
         .catch(err => log(`/usage verification error: ${err}`))
         .finally(() => { isVerifying = false; });
     return true;
+}
+
+// "You've hit your …" — Claude saying the quota is gone. Only a bar at
+// USAGE_CONFIRM_PCT confirms it.
+function handleLimitBanner(screen: string): boolean {
+    return handleStopBanner(
+        screen, newestBanner(screen, LIMIT_PATTERNS, 'limit'), 'Limit banner', USAGE_CONFIRM_PCT);
+}
+
+// "● Checkpoint …" — Claude stopping itself just short of the limit. Same
+// handling, lower bar: at 100% it would never fire, since the whole point of a
+// checkpoint is that it lands before the session is spent.
+function handleCheckpointBanner(screen: string): boolean {
+    return handleStopBanner(
+        screen, newestBanner(screen, CHECKPOINT_PATTERNS, 'checkpoint'), 'Checkpoint', CHECKPOINT_CONFIRM_PCT);
 }
 
 // A 529 is transient, so there is no panel to confirm it against — the screen is
@@ -1127,7 +1200,11 @@ interface UsageReading {
     weeklyResetAtMs: number | null;
 }
 
-async function verifyViaUsage(bannerKey: string): Promise<void> {
+// Read the panel and decide. `sessionConfirmPct` is how full the session bar has
+// to read for the banner that sent us here to count as real: USAGE_CONFIRM_PCT
+// for a limit banner, the lower CHECKPOINT_CONFIRM_PCT for a checkpoint. The
+// weekly bar is always held to USAGE_CONFIRM_PCT — see CHECKPOINT_CONFIRM_PCT.
+async function verifyViaUsage(bannerKey: string, sessionConfirmPct: number): Promise<void> {
     const usage = await readUsagePanel();
     if (usage === null) {
         usageRetryUntil = Date.now() + USAGE_RETRY_COOLDOWN_MS;
@@ -1140,11 +1217,11 @@ async function verifyViaUsage(bannerKey: string): Promise<void> {
         `, resets ${usage.weeklyResetAtMs === null ? 'n/a' : new Date(usage.weeklyResetAtMs).toLocaleString()}`);
 
     // The limits that are actually spent, each with the moment it comes back.
-    // Either bar at 100% stops the session on its own, so both are collected: we
+    // Either bar stops the session on its own, so both are collected: we
     // wait for the last of them, since resuming while the other is still spent
     // would only walk into the banner again.
     const exhausted: { name: string; resumeAt: number | null }[] = [];
-    if (usage.sessionPercentUsed >= USAGE_CONFIRM_PCT) {
+    if (usage.sessionPercentUsed >= sessionConfirmPct) {
         exhausted.push({
             name: 'session',
             resumeAt: usage.sessionResetMinutesOfDay === null
@@ -1164,7 +1241,8 @@ async function verifyViaUsage(bannerKey: string): Promise<void> {
     if (exhausted.length === 0) {
         disprovedBannerKey = bannerKey;
         disprovedAt = Date.now();
-        log(`Every limit below ${USAGE_CONFIRM_PCT}% — banner ${bannerKey} is stale, ignoring it from now on`);
+        log(`Session below ${sessionConfirmPct}% and week below ${USAGE_CONFIRM_PCT}%` +
+            ` — banner ${bannerKey} is stale, ignoring it from now on`);
         return;
     }
 
@@ -1188,7 +1266,7 @@ async function verifyViaUsage(bannerKey: string): Promise<void> {
     disprovedAt = 0;
     usageRetryUntil = 0;
 
-    log(`Confirmed by /usage: ${exhausted.map(l => l.name).join(' + ')} at ${USAGE_CONFIRM_PCT}%`);
+    log(`Confirmed by /usage: ${exhausted.map(l => l.name).join(' + ')} spent`);
     const resumeAt: number = Math.max(...resumeTimes);
     startCountdown(resumeAt < Date.now() ? Date.now() + MIN_WAIT_MS : resumeAt);
 }
