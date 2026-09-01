@@ -22,7 +22,9 @@ The difference: when Claude stops — because you've hit a usage limit (session,
 weekly, or monthly spend), or because it parked the session at a **checkpoint**
 just short of one — `claude-auto` sends a quick `/usage` command to confirm it,
 counts the wait down in your window title, and sends `continue`
-the moment your quota is back. No babysitting, no lost context.
+the moment your quota is back. And where Claude offers `/low-priority` — keep
+going now, on spare capacity — it takes that instead of waiting at all. No
+babysitting, no lost context.
 
 The package is published to npm as [`@hotox/claude-auto`](https://www.npmjs.com/package/@hotox/claude-auto).
 
@@ -173,7 +175,16 @@ When a limit banner appears:
 
 1. **If Claude is offering its "Stop and wait for limit to reset" menu**, it
    selects that option for you.
-2. **Otherwise it confirms the limit against `/usage`.** It opens Claude's
+2. **If Claude is offering `/low-priority`**, it takes the offer instead of
+   waiting. Newer Claude Code builds print a line beneath the limit —
+   `⚠ /low-priority to continue now at lower priority · uses your weekly limit` —
+   and where that's on screen there's nothing to wait for: `claude-auto` submits
+   the command and the session carries straight on, out of your weekly quota. No
+   `/usage` read either, since the offer is only ever printed beside a limit
+   that's blocking right now. The command is a *toggle*, so it's only ever sent
+   once per limit: Claude's echo of it (`❯ /low-priority`) marks everything above
+   it as handled, exactly the way the `continue` from a countdown does.
+3. **Otherwise it confirms the limit against `/usage`.** It opens Claude's
    `/usage` panel and reads the two bars that can stop a session: *Current
    session* and *Current week (all models)*, each one's percent used and reset
    time. Only a bar at **100% used** confirms the limit, so a stale banner on
@@ -181,7 +192,7 @@ When a limit banner appears:
    stale when *neither* bar is spent. If the window is too small to show both
    blocks, the panel is scrolled step by step until they've been read. Then the
    panel is closed with Esc.
-3. **Then it waits.** It counts down to the reset time reported by `/usage`
+4. **Then it waits.** It counts down to the reset time reported by `/usage`
    (plus a one-minute safety buffer) — more precise than the rounded time in the
    banner, and the only source when the banner carries no time at all — showing
    the remaining time in your window title, and sends `continue` when the clock
@@ -196,7 +207,8 @@ of the phrases in `CHECKPOINT_PHRASES` (`checkpoint`, `usage limit` today) count
 as one — adding a wording is a one-line change there.
 
 A checkpoint runs through everything above unchanged — the same staleness test,
-the same disproof memo, the same `/usage` panel read, the same countdown — with
+the same `/low-priority` shortcut, the same disproof memo, the same `/usage`
+panel read, the same countdown — with
 one difference: it fires *before* the session is spent, so the 100% rule would
 never confirm it. The **Current session** bar only has to read **95% used**
 (`CHECKPOINT_CONFIRM_PCT`). Below that, the line is written off as stale and
@@ -224,6 +236,10 @@ Some more details:
   a summary* ("Resume from summary (recommended)" / "Resume full session
   as-is"). If a countdown runs out while the question is up, `claude-auto` holds 
   and resumes the moment you've answered.
+- A limit banner with either of the things we send below it — the `continue` from
+  a countdown, or a `/low-priority` — is scrollback, not a live stop, so it's
+  never acted on twice. That's what makes a just-waited-out limit safe to leave on
+  screen, with no time window to tune.
 - A reset that's already been counted down to is ignored if the same banner
   reappears, until enough time has passed that it must be a genuinely new limit.
 - A banner that `/usage` disproves (no bar as full as the threshold that applies

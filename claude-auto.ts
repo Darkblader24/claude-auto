@@ -148,9 +148,9 @@ const RESUME_PROMPT_TEXT: string = '❯ resume from summary';
 // (percent used + reset time), and close it again. The reset times shown there
 // are authoritative — banner times are rounded and the banner itself can be stale.
 const USAGE_COMMAND: string = '/usage';
-// Pause between typing the command and pressing Enter, so the slash-command
-// autocomplete has settled on /usage before we submit it.
-const USAGE_MENU_SETTLE_MS: number = 500;
+// Pause between typing a slash command and pressing Enter, so the autocomplete
+// has settled on it before we submit it — /usage here, /low-priority below.
+const SLASH_MENU_SETTLE_MS: number = 500;
 // Pause after Enter before the first read, so the panel has rendered.
 const USAGE_RENDER_DELAY_MS: number = 1500;
 
@@ -243,6 +243,33 @@ const WAIT_BUFFER_MS: number = 60 * 1000;
 // the backstop for it.
 const MIN_WAIT_MS: number = 5 * 60 * 1000;
 
+// A spent session doesn't always leave us with nothing to do but wait. Claude
+// Code can offer a way to keep going right now, on spare capacity, billed against
+// the weekly quota, and it prints that offer beneath the limit:
+//
+//   ⚠ /low-priority to continue now at lower priority · uses your weekly limit
+//
+// When that line is live we take the offer instead of counting down to a reset:
+// submitting the command carries the session straight on (Claude re-prompts
+// itself to finish the interrupted work). The offer is only ever printed beside a
+// limit that's blocking right now, which makes it its own confirmation — so this
+// path skips the /usage read entirely.
+//
+// Matched against the rendered screen, so: the warning glyph has to open the
+// line, which stops prose that merely mentions the command from tripping it; the
+// gaps are lenient, because the line re-wraps at narrow widths; and only the
+// stable opening of the sentence is required, not the "· uses your weekly limit"
+// footnote, which is the half most likely to be reworded.
+const LOW_PRIORITY_COMMAND: string = '/low-priority';
+const lowPriorityOfferRegex: RegExp =
+    /(?:^|\n)[ \t]*⚠[ \t]*\/low-priority\s+to\s+continue\s+now/i;
+
+// The command is a toggle — a second one switches low priority back *off* — so
+// sending it twice is worse than useless. Detection is held off from the moment
+// we type it until Claude's echo of it is on screen and takes that job over (see
+// LOW_PRIORITY_MARKER).
+const LOW_PRIORITY_GRACE_MS: number = 5000;
+
 // The text sent to continue a session
 const RESUME_CONTINUE_TEXT: string = 'continue';
 
@@ -258,6 +285,13 @@ const RESUME_CONTINUE_TEXT: string = 'continue';
 // DISPROVED_LIMIT_WINDOW_MS — a safe failure, but confirm it against an
 // --auto-debug screen capture (logScreen writes exactly what we match here).
 const RESUME_CONTINUE_MARKER: string = '❯ ' + RESUME_CONTINUE_TEXT;
+
+// Submitting /low-priority leaves the same kind of trace, and it means the same
+// thing: whatever sits above it is a stop we've already dealt with. So the two
+// are one test — a limit banner, checkpoint, error or /low-priority offer with
+// either marker below it is scrollback, not a live stop.
+const LOW_PRIORITY_MARKER: string = '❯ ' + LOW_PRIORITY_COMMAND;
+const HANDLED_STOP_MARKERS: readonly string[] = [RESUME_CONTINUE_MARKER, LOW_PRIORITY_MARKER];
 
 // Ctrl-U clears the input line in Claude Code; the draft can wrap, so we fire it
 // a few times to wipe the whole composer before typing our own command.
@@ -698,6 +732,7 @@ const term = new Terminal({ cols, rows, allowProposedApi: true });
 let isWaiting: boolean = false;     // a confirmed limit countdown is running
 let isVerifying: boolean = false;   // /usage panel is open for verification
 let isHandlingMenu: boolean = false; // selecting the wait-for-reset menu
+let isHandlingLowPriority: boolean = false; // /low-priority submitted, waiting for its echo
 let countdownInterval: NodeJS.Timeout | null = null;
 let disprovedBannerKey: string | null = null; // identity of the banner /usage said wasn't a limit
 let disprovedAt: number = 0;                  // wall-clock time /usage disproved it
@@ -971,7 +1006,7 @@ function main(): void {
     // Capture the screen state every x seconds
     captureInterval = setInterval(() => {
         // Already handling a limit (waiting it out or mid-verification) — do nothing.
-        if (isWaiting || isVerifying || isHandlingMenu) return;
+        if (isWaiting || isVerifying || isHandlingMenu || isHandlingLowPriority) return;
         currentScreen = captureScreen();
         onScreenCapture();
     }, SCREEN_CAPTURE_INTERVAL_MS);
@@ -1053,12 +1088,23 @@ function newestBanner(screen: string, patterns: RegExp[], kind: string): LimitBa
     return newest;
 }
 
-// True when the "continue" we send on resume sits below `index` — i.e. we've
-// already resumed past whatever we matched there, so it's stale scrollback.
-// See RESUME_CONTINUE_MARKER: a genuinely live banner or error renders below
-// the last continue, so nothing follows it and it still gets handled.
-function alreadyResumedPast(screen: string, index: number): boolean {
-    return screen.slice(index).includes(RESUME_CONTINUE_MARKER);
+// True when something we sent to get a stopped session moving again — the
+// "continue" from a countdown, or a /low-priority — sits below `index`, i.e. we
+// have already dealt with whatever we matched there, so it's stale scrollback.
+// See HANDLED_STOP_MARKERS: a genuinely live banner, offer or error renders below
+// the last of them, so nothing follows it and it still gets handled.
+function alreadyHandledPast(screen: string, index: number): boolean {
+    const below: string = screen.slice(index);
+    return HANDLED_STOP_MARKERS.some(marker => below.includes(marker));
+}
+
+// A /low-priority offer that's still live: on screen, and with nothing we've
+// already sent below it. Both halves matter — the offer printed beside a limit we
+// have *already* taken it for stays on screen, and acting on it a second time
+// would toggle the session back to normal priority.
+function hasLiveLowPriorityOffer(screen: string): boolean {
+    const offer = lastMatch(screen, lowPriorityOfferRegex);
+    return offer !== null && !alreadyHandledPast(screen, offer.index);
 }
 
 // True while Claude's resume-from-summary question is on screen. Answering it is
@@ -1069,7 +1115,7 @@ function hasResumePrompt(screen: string): boolean {
 
 function detectLimit(screen: string): void {
     // Already handling a limit (waiting it out or mid-verification) — do nothing.
-    if (isWaiting || isVerifying || isHandlingMenu) return;
+    if (isWaiting || isVerifying || isHandlingMenu || isHandlingLowPriority) return;
 
     // Scrolled-up history is stale; ignore it.
     if (screen.includes(SCROLL_INDICATOR)) return;
@@ -1107,8 +1153,8 @@ function detectLimit(screen: string): void {
 
 // A limit banner and a checkpoint are the same situation — the session has
 // stopped and won't restart on its own — so both run through one handler, and
-// with it one set of safeguards: the resumed-"continue" staleness test, the
-// disproof memo, the /usage backoff, and the /usage confirmation itself. The
+// with it one set of safeguards: the staleness test, the /low-priority shortcut,
+// the disproof memo, the /usage backoff, and the /usage confirmation itself. The
 // only thing that differs is how full the session bar has to read before the
 // stop counts as real (see CHECKPOINT_CONFIRM_PCT).
 //
@@ -1122,13 +1168,25 @@ function handleStopBanner(
 ): boolean {
     if (banner === null) return false;
 
-    // If the "continue" we sent on resume sits below the banner, we've already
-    // resumed past it — it's stale scrollback, so ignore it. A genuinely still-live
-    // stop renders below that continue, so it has nothing after it and falls
-    // through to /usage.
-    if (alreadyResumedPast(screen, banner.index)) {
-        log(`${label} sits above a resumed "continue" — ignoring as stale`);
+    // If something we sent to get the session going again — a resumed "continue",
+    // a /low-priority — sits below the banner, we've already dealt with it and this
+    // is stale scrollback, so ignore it. A genuinely still-live stop renders below
+    // the last of those, so it has nothing after it and falls through.
+    if (alreadyHandledPast(screen, banner.index)) {
+        log(`${label} sits above a resume we already sent — ignoring as stale`);
         return false;
+    }
+
+    // Claude is offering to continue right now at lower priority. That beats
+    // every path below: there's no reset to wait for, and no /usage read to do —
+    // the offer only shows up beside a limit that's blocking right now, so it
+    // confirms the banner by being there. Checked before the disproof memo and
+    // the /usage backoff, both of which exist only to keep us from re-opening
+    // the panel, which this doesn't do.
+    if (hasLiveLowPriorityOffer(screen)) {
+        log(`${label} with a live /low-priority offer — continuing at lower priority`);
+        sendLowPriority();
+        return true;
     }
 
     // This exact banner was already checked against /usage and disproved. Opening
@@ -1173,16 +1231,30 @@ function handleCheckpointBanner(screen: string): boolean {
         screen, newestBanner(screen, CHECKPOINT_PATTERNS, 'checkpoint'), 'Checkpoint', CHECKPOINT_CONFIRM_PCT);
 }
 
+// Submit /low-priority, in the same two steps as /usage: type it, let the
+// autocomplete settle on it, then Enter. Detection stays out of the way until
+// Claude's echo of the command is on screen, from where LOW_PRIORITY_MARKER keeps
+// the limit above it from being re-detected — and keeps the offer beside it from
+// being taken a second time, which would switch low priority back off.
+function sendLowPriority(): void {
+    isHandlingLowPriority = true;
+    ptyProcess.write(CLEAR_INPUT_SEQUENCE + LOW_PRIORITY_COMMAND);
+    setTimeout(() => {
+        ptyProcess.write('\r');
+        setTimeout(() => { isHandlingLowPriority = false; }, LOW_PRIORITY_GRACE_MS);
+    }, SLASH_MENU_SETTLE_MS);
+}
+
 // A 529 is transient, so there is no panel to confirm it against — the screen is
 // the whole evidence. It goes through the same guards as a limit banner
 // (scrolled-up history, the resume question, the wait-for-reset menu, and the
-// resumed-"continue" staleness test), then just waits it out.
+// staleness test), then just waits it out.
 function handleApiError(screen: string): void {
     const error = lastMatch(screen, apiErrorRegex);
     if (error === null) return;
 
-    if (alreadyResumedPast(screen, error.index)) {
-        log('API error sits above a resumed "continue" — ignoring as stale');
+    if (alreadyHandledPast(screen, error.index)) {
+        log('API error sits above a resume we already sent — ignoring as stale');
         return;
     }
 
@@ -1348,7 +1420,7 @@ function weeklyResetTime(match: RegExpMatchArray): number | null {
 // returning; null means even the session bar couldn't be read.
 async function readUsagePanel(): Promise<UsageReading | null> {
     ptyProcess.write(CLEAR_INPUT_SEQUENCE + USAGE_COMMAND);
-    await sleep(USAGE_MENU_SETTLE_MS);
+    await sleep(SLASH_MENU_SETTLE_MS);
     ptyProcess.write('\r');
     await sleep(USAGE_RENDER_DELAY_MS);
 
